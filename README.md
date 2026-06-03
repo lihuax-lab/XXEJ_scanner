@@ -47,6 +47,7 @@ Optional:
 --peak-bed peaks.bed
 --sample-name treated
 --control-name control
+--depth-count-method pileup
 --include-supplementary
 ```
 
@@ -65,6 +66,7 @@ uv run --no-editable XXEJ_scanner scan \
   --clip-cluster-window 20 \
   --coverage-bin-size 100 \
   --merge-distance 300 \
+  --depth-count-method pileup \
   --min-alt-support 3
 ```
 
@@ -96,6 +98,8 @@ igv_loci.bed
 ```
 
 Coordinates are 0-based half-open for BED-like intervals. Breakpoint positions are reported as 0-based reference positions derived from alignment starts for left clips and alignment ends for right clips.
+
+Depth columns in `breakpoint_clusters.tsv` and `events.tsv` report local depth around the clustered breakpoint window, not depth across the full candidate region. With `--depth-count-method pileup`, the scanner reports mean base-level pileup depth across that local window. With `--depth-count-method region`, it reports the number of unique read names overlapping the local window, which is similar to the original molecule/read support count.
 
 By default, discovery filters use mapped, primary, non-secondary alignments that pass MAPQ and aligned-length thresholds. Duplicate reads are excluded unless `--allow-duplicates` is set. Supplementary alignments are excluded unless `--include-supplementary` is set; SA tags on primary alignments are still parsed for split-read evidence.
 

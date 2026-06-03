@@ -52,6 +52,7 @@ class ScannerConfig:
     min_microhomology_length: int = 1
     max_microhomology_length: int = 20
     second_pass_window: int = 150
+    depth_count_method: str = "pileup"
 
 
 @dataclass(slots=True)
@@ -155,8 +156,8 @@ class BreakpointCluster:
     clip_count: int
     left_clip_count: int
     right_clip_count: int
-    treated_depth: int = 0
-    control_depth: int = 0
+    treated_depth: float = 0.0
+    control_depth: float = 0.0
     clip_rate: float = 0.0
     strand_plus_count: int = 0
     strand_minus_count: int = 0

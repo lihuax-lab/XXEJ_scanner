@@ -87,6 +87,9 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--min-microhomology-length", type=int, default=1)
     scan.add_argument("--max-microhomology-length", type=int, default=20)
     scan.add_argument("--second-pass-window", type=int, default=150)
+    scan.add_argument(
+        "--depth-count-method", choices=["pileup", "region"], default="pileup"
+    )
     return parser
 
 
@@ -128,6 +131,7 @@ def _config_from_args(args: argparse.Namespace) -> ScannerConfig:
         min_microhomology_length=args.min_microhomology_length,
         max_microhomology_length=args.max_microhomology_length,
         second_pass_window=args.second_pass_window,
+        depth_count_method=args.depth_count_method,
     )
 
 
