@@ -52,16 +52,11 @@ def detect_microhomology(
     if bkp_a > bkp_b:
         bkp_a, bkp_b = bkp_b, bkp_a
     for length in range(max_len, min_len - 1, -1):
-        # Check both upstream and downstream flanks. Different aligners can place
-        # an imprecise junction on either side of a short homology run.
+        # Detect microhomology for a canonical L-m-X-m-R -> L-m-R deletion model.
         left = reference.fetch(chrom, bkp_a - length, bkp_a)
-        right = reference.fetch(chrom, bkp_b - length, bkp_b)
+        right = reference.fetch(chrom, bkp_b, bkp_b + length)
         if len(left) == length and left == right:
             return left, length
-        left_forward = reference.fetch(chrom, bkp_a, bkp_a + length)
-        right_forward = reference.fetch(chrom, bkp_b, bkp_b + length)
-        if len(left_forward) == length and left_forward == right_forward:
-            return left_forward, length
     return "NA", 0
 
 
