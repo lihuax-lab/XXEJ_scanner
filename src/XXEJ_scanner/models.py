@@ -43,6 +43,7 @@ class ScannerConfig:
     discordant_min_distance: int = 1000
     library_orientation: str = "fr"
     allow_duplicates: bool = False
+    include_supplementary: bool = False
     min_aligned_length: int = 20
     scan_padding: int = 200
     max_local_event_distance: int = 10000

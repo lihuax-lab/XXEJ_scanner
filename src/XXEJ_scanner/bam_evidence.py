@@ -77,7 +77,6 @@ def passes_read_filters(
     read: object,
     config: ScannerConfig,
     *,
-    include_supplementary: bool = False,
     min_mapq: int | None = None,
 ) -> bool:
     # These are discovery filters. Supplementary reads are skipped here because
@@ -87,7 +86,7 @@ def passes_read_filters(
         return False
     if getattr(read, "is_secondary", False):
         return False
-    if getattr(read, "is_supplementary", False) and not include_supplementary:
+    if getattr(read, "is_supplementary", False) and not config.include_supplementary:
         return False
     if getattr(read, "is_duplicate", False) and not config.allow_duplicates:
         return False
@@ -408,7 +407,6 @@ def iter_bam_records(
         if passes_read_filters(
             read,
             config,
-            include_supplementary=include_supplementary,
             min_mapq=min_mapq,
         ):
             yield read

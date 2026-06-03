@@ -78,6 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--library-orientation", choices=["fr", "rf", "ff", "rr", "any"], default="fr"
     )
     scan.add_argument("--allow-duplicates", action="store_true")
+    scan.add_argument("--include-supplementary", action="store_true")
     scan.add_argument("--min-aligned-length", type=int, default=20)
     scan.add_argument("--scan-padding", type=int, default=200)
     scan.add_argument("--max-local-event-distance", type=int, default=10000)
@@ -118,6 +119,7 @@ def _config_from_args(args: argparse.Namespace) -> ScannerConfig:
         discordant_min_distance=args.discordant_min_distance,
         library_orientation=args.library_orientation,
         allow_duplicates=args.allow_duplicates,
+        include_supplementary=args.include_supplementary,
         min_aligned_length=args.min_aligned_length,
         scan_padding=args.scan_padding,
         max_local_event_distance=args.max_local_event_distance,

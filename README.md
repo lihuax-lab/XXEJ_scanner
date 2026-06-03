@@ -47,6 +47,7 @@ Optional:
 --peak-bed peaks.bed
 --sample-name treated
 --control-name control
+--include-supplementary
 ```
 
 BAM and FASTA indexes are required. Missing `.bai`/`.csi` or `.fai` files are reported as errors.
@@ -95,6 +96,8 @@ igv_loci.bed
 ```
 
 Coordinates are 0-based half-open for BED-like intervals. Breakpoint positions are reported as 0-based reference positions derived from alignment starts for left clips and alignment ends for right clips.
+
+By default, discovery filters use mapped, primary, non-secondary alignments that pass MAPQ and aligned-length thresholds. Duplicate reads are excluded unless `--allow-duplicates` is set. Supplementary alignments are excluded unless `--include-supplementary` is set; SA tags on primary alignments are still parsed for split-read evidence.
 
 ## Event Types
 
