@@ -49,6 +49,8 @@ class ScannerConfig:
     max_local_event_distance: int = 10000
     max_insertion_length: int = 50
     min_indel_length: int = 1
+    min_nhej_ins_indel_support: int = 1
+    allow_clip_only_nhej_ins: bool = False
     min_microhomology_length: int = 1
     max_microhomology_length: int = 20
     second_pass_window: int = 150

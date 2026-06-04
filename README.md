@@ -49,6 +49,8 @@ Optional:
 --control-name control
 --depth-count-method pileup
 --include-supplementary
+--min-nhej-ins-indel-support 1
+--allow-clip-only-nhej-ins
 ```
 
 BAM and FASTA indexes are required. Missing `.bai`/`.csi` or `.fai` files are reported as errors.
@@ -103,11 +105,13 @@ Depth columns in `breakpoint_clusters.tsv` and `events.tsv` report local depth a
 
 By default, discovery filters use mapped, primary, non-secondary alignments that pass MAPQ and aligned-length thresholds. Duplicate reads are excluded unless `--allow-duplicates` is set. Supplementary alignments are excluded unless `--include-supplementary` is set; SA tags on primary alignments are still parsed for split-read evidence.
 
+When no control BAM is supplied, de novo candidate regions are selected from the treated sample's high-coverage bins. For broad no-control scans, consider stricter discovery thresholds such as `--top-percentile 99`, `--min-treated-coverage 20`, and `--min-alt-support 5`. Avoid `--include-supplementary` unless supplementary alignments are specifically needed, because SA tags on primary alignments are already parsed for split-read evidence.
+
 ## Event Types
 
-`NHEJ_INS` marks a candidate local end-joining event with small inserted or filler sequence evidence near a clipped breakpoint.
+`NHEJ_INS` marks a candidate local end-joining event with small inserted or filler sequence evidence near a clipped breakpoint. By default, it requires at least one nearby CIGAR insertion read (`--min-nhej-ins-indel-support 1`) so clip-only breakpoint clusters are not automatically reported as local insertions. Use `--allow-clip-only-nhej-ins` to restore clip-only filler-sequence calls.
 
-`MMEJ_DEL` marks a candidate local deletion event with paired local breakpoint evidence and reference microhomology context.
+`MMEJ_DEL` marks a candidate local deletion event with paired local breakpoint evidence and reference microhomology context. The left breakpoint must be supported by right-clipped reads, or by a mixed-side cluster, and the right breakpoint must be supported by left-clipped reads, or by a mixed-side cluster. This prevents a short doubly clipped alignment from being misreported as a deletion spanning its aligned seed.
 
 `NHEJ_BND_INS_INTRA` and `NHEJ_BND_INS_INTER` mark candidate wrong-end joining supported by local clipping plus distant same-chromosome or inter-chromosome split/paired evidence.
 

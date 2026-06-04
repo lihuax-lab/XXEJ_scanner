@@ -13,6 +13,12 @@ def assign_event_filter(event: RepairEvent, config: ScannerConfig) -> str:
         return "LowSupport"
     if event.normal_noise > config.max_normal_clip_rate:
         return "HighControlNoise"
+    if (
+        event.event_type == "NHEJ_INS"
+        and not config.allow_clip_only_nhej_ins
+        and event.alt_indel_support < config.min_nhej_ins_indel_support
+    ):
+        return "NoInsertionEvidence"
     if event.alt_clip_support < config.min_alt_support and event.event_type in {"NHEJ_INS", "MMEJ_DEL"}:
         return "WeakClipCluster"
     if event.event_type.startswith("NHEJ_BND") and (
@@ -57,6 +63,17 @@ def second_pass_validate_event(
     strict_remote_support = {pair.read_name for pair in strict_evidence.discordant_pairs} | {
         split.read_name for split in strict_evidence.split_reads
     }
+
+    if (
+        event.event_type == "NHEJ_INS"
+        and not config.allow_clip_only_nhej_ins
+        and len(strict_indel_support) < config.min_nhej_ins_indel_support
+    ):
+        event.filter = "NoInsertionEvidence"
+        if event.notes:
+            event.notes += " "
+        event.notes += "Second-pass strict insertion support was below threshold."
+        return event
 
     # Any strict evidence class can rescue the event, but it must reach the same
     # minimum support threshold used during discovery.
