@@ -11,7 +11,7 @@ from .breakpoints import (
     filter_breakpoint_clusters,
     score_breakpoint_cluster,
 )
-from .classify import classify_local_events
+from .classify import assign_final_event_ids, classify_local_events
 from .coverage import (
     annotate_region_coverage,
     call_candidate_regions,
@@ -261,6 +261,8 @@ def run_scan(config: ScannerConfig) -> dict[str, object]:
                 event = second_pass_validate_event(event, config.treated_bam, config)
                 all_events.append(event)
             all_event_evidence.extend(event_evidence)
+
+    assign_final_event_ids(all_events, all_event_evidence)
 
     log("[6/6] Writing outputs")
     write_candidate_regions_bed(output_paths["candidate_regions"], regions)

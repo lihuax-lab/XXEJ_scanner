@@ -127,15 +127,39 @@ def classify_local_events(
             events.append(insertion_event)
             event_evidence.extend(insertion_evidence)
 
-    for idx, event in enumerate(events, 1):
-        # Classifiers use temporary IDs so their evidence rows can be joined
-        # before final deterministic event IDs are assigned.
-        old_event_id = event.event_id
-        event.event_id = f"XEJ_{idx:06d}"
-        for ev in event_evidence:
-            if ev.event_id == old_event_id:
-                ev.event_id = event.event_id
     return events, event_evidence
+
+
+def assign_final_event_ids(
+    events: list[RepairEvent],
+    evidence: list[EventEvidence],
+) -> tuple[list[RepairEvent], list[EventEvidence]]:
+    # Classifiers emit temporary IDs so their read-level evidence can be joined
+    # locally. Final IDs must be assigned once globally after all regions have
+    # been scanned, otherwise each region starts again at XEJ_000001.
+    temporary_counts = Counter(event.event_id for event in events)
+    duplicate_temporary_ids = sorted(
+        event_id for event_id, count in temporary_counts.items() if count > 1
+    )
+    if duplicate_temporary_ids:
+        duplicates = ", ".join(duplicate_temporary_ids[:5])
+        raise ValueError(
+            "Temporary event IDs are not unique; cannot safely assign final IDs. "
+            f"Duplicate IDs include: {duplicates}"
+        )
+
+    id_map: dict[str, str] = {}
+    for idx, event in enumerate(events, 1):
+        old_event_id = event.event_id
+        new_event_id = f"XEJ_{idx:06d}"
+        id_map[old_event_id] = new_event_id
+        event.event_id = new_event_id
+
+    for ev in evidence:
+        if ev.event_id in id_map:
+            ev.event_id = id_map[ev.event_id]
+
+    return events, evidence
 
 
 def classify_bnd_events(
@@ -212,7 +236,10 @@ def classify_bnd_events(
                 if site.chrom == cluster.chrom
                 and _near(site.pos, cluster.peak_pos, config.clip_cluster_window)
             }
-            temp_event_id = f"TMP_BND_{cluster.chrom}_{cluster.peak_pos}_{remote_chrom}_{remote_pos}"
+            temp_event_id = (
+                f"TMP_BND_{region.region_id}_{cluster.chrom}_{cluster.peak_pos}_"
+                f"{remote_chrom}_{remote_pos}"
+            )
             event = RepairEvent(
                 event_id=temp_event_id,
                 event_type=event_type,
@@ -377,7 +404,7 @@ def _classify_mmej_del(
         return events, event_evidence, used
 
     event = RepairEvent(
-        event_id=f"TMP_MMEJ_{left.chrom}_{left.peak_pos}_{right.peak_pos}",
+        event_id=f"TMP_MMEJ_{region.region_id}_{left.chrom}_{left.peak_pos}_{right.peak_pos}",
         event_type="MMEJ_DEL",
         chrom=left.chrom,
         start=min(left.peak_pos, right.peak_pos),
@@ -580,7 +607,7 @@ def _classify_nhej_ins(
         else "Candidate local NHEJ-like insertion from clipped filler-sequence evidence only."
     )
     event = RepairEvent(
-        event_id=f"TMP_INS_{cluster.chrom}_{cluster.peak_pos}_{cluster.clip_side}",
+        event_id=f"TMP_INS_{region.region_id}_{cluster.chrom}_{cluster.peak_pos}_{cluster.clip_side}",
         event_type="NHEJ_INS",
         chrom=cluster.chrom,
         start=max(region.start, cluster.peak_pos - 1),

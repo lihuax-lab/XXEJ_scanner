@@ -6,13 +6,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from XXEJ_scanner.classify import _classify_mmej_del
+from XXEJ_scanner.classify import _classify_mmej_del, assign_final_event_ids
 from XXEJ_scanner.models import (
     BreakpointCluster,
     CandidateRegion,
     CigarIndel,
     ClipSite,
+    EventEvidence,
     RegionEvidence,
+    RepairEvent,
     ScannerConfig,
     SplitReadEvidence,
 )
@@ -122,6 +124,59 @@ def split_read(pos: int, remote_pos: int, read_name: str) -> SplitReadEvidence:
         cigar="10M",
         sa_tag="chr1,1,+,10M,60,0;",
     )
+
+
+def repair_event(event_id: str, pos: int = 10) -> RepairEvent:
+    return RepairEvent(
+        event_id=event_id,
+        event_type="NHEJ_INS",
+        chrom="chr1",
+        start=pos,
+        end=pos + 1,
+        bkp_A_chrom="chr1",
+        bkp_A_pos=pos,
+        bkp_A_side="left_clip",
+    )
+
+
+def event_evidence(event_id: str, read_name: str, pos: int = 10) -> EventEvidence:
+    return EventEvidence(
+        event_id=event_id,
+        read_name=read_name,
+        evidence_type="soft_clip",
+        chrom="chr1",
+        pos=pos,
+    )
+
+
+class FinalEventIdAssignmentTest(unittest.TestCase):
+    def test_assigns_global_ids_and_updates_evidence_links(self) -> None:
+        events = [
+            repair_event("TMP_INS_region1_chr1_10_left_clip", 10),
+            repair_event("TMP_INS_region2_chr1_20_left_clip", 20),
+        ]
+        evidence = [
+            event_evidence("TMP_INS_region1_chr1_10_left_clip", "read1", 10),
+            event_evidence("TMP_INS_region2_chr1_20_left_clip", "read2", 20),
+        ]
+
+        assign_final_event_ids(events, evidence)
+
+        self.assertEqual([event.event_id for event in events], ["XEJ_000001", "XEJ_000002"])
+        self.assertEqual(
+            [row.event_id for row in evidence],
+            ["XEJ_000001", "XEJ_000002"],
+        )
+
+    def test_rejects_duplicate_temporary_ids_before_relinking_evidence(self) -> None:
+        events = [
+            repair_event("TMP_DUPLICATE", 10),
+            repair_event("TMP_DUPLICATE", 20),
+        ]
+        evidence = [event_evidence("TMP_DUPLICATE", "read1", 10)]
+
+        with self.assertRaisesRegex(ValueError, "Temporary event IDs are not unique"):
+            assign_final_event_ids(events, evidence)
 
 
 class ClassifyMmejDeletionTest(unittest.TestCase):
