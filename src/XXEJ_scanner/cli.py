@@ -88,6 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--allow-clip-only-nhej-ins", action="store_true")
     scan.add_argument("--min-microhomology-length", type=int, default=1)
     scan.add_argument("--max-microhomology-length", type=int, default=20)
+    scan.add_argument("--microhomology-search-window", type=int, default=5)
     scan.add_argument("--second-pass-window", type=int, default=150)
     scan.add_argument(
         "--depth-count-method", choices=["pileup", "region"], default="pileup"
@@ -134,6 +135,7 @@ def _config_from_args(args: argparse.Namespace) -> ScannerConfig:
         allow_clip_only_nhej_ins=args.allow_clip_only_nhej_ins,
         min_microhomology_length=args.min_microhomology_length,
         max_microhomology_length=args.max_microhomology_length,
+        microhomology_search_window=args.microhomology_search_window,
         second_pass_window=args.second_pass_window,
         depth_count_method=args.depth_count_method,
     )
