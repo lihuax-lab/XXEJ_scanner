@@ -28,6 +28,16 @@ def _cluster_side(cluster: BreakpointCluster) -> str:
     return cluster.clip_side
 
 
+def _is_deletion_breakpoint_pair(left: BreakpointCluster, right: BreakpointCluster) -> bool:
+    # For a deletion, reads ending at the left breakpoint produce right clips,
+    # and reads starting at the right breakpoint produce left clips. A "both"
+    # cluster can still be used when both clip sides pile up at the same locus.
+    return left.clip_side in {"right_clip", "both"} and right.clip_side in {
+        "left_clip",
+        "both",
+    }
+
+
 def _event_score(event: RepairEvent) -> float:
     # First-version scoring is deliberately transparent. It is a ranking aid for
     # review/IGV triage, not a calibrated probability or genotype likelihood.
@@ -235,6 +245,8 @@ def _classify_mmej_del(
             distance = abs(right.peak_pos - left.peak_pos)
             if distance <= 0 or distance > config.max_local_event_distance:
                 continue
+            if not _is_deletion_breakpoint_pair(left, right):
+                continue
             deletion_support = _indels_near_pair(
                 evidence.indels, left.peak_pos, right.peak_pos, config
             )
@@ -326,8 +338,8 @@ def _classify_nhej_ins(
     config: ScannerConfig,
 ) -> tuple[RepairEvent | None, list[EventEvidence]]:
     # NHEJ_INS is intentionally local: it uses nearby short CIGAR insertions and
-    # clipped sequence but avoids creating a local insertion if remote support is
-    # strong enough to classify the cluster as a BND first.
+    # optional clipped filler sequence, but avoids turning every unsupported clip
+    # cluster into a local insertion.
     local_insertions = [
         indel
         for indel in evidence.indels
@@ -342,28 +354,42 @@ def _classify_nhej_ins(
         if site.chrom == cluster.chrom
         and _near(site.pos, cluster.peak_pos, config.clip_cluster_window)
     ]
-    support_reads = {site.read_name for site in local_clips}
-    support_reads.update(indel.read_name for indel in local_insertions)
+    short_clip_proxies = [
+        site
+        for site in local_clips
+        if site.clip_length <= config.max_insertion_length
+        and site.clip_sequence
+        and site.clip_sequence != "NA"
+    ]
+    insertion_reads = {indel.read_name for indel in local_insertions}
+
+    if len(insertion_reads) < config.min_nhej_ins_indel_support:
+        if not config.allow_clip_only_nhej_ins:
+            return None, []
+        support_reads = {site.read_name for site in short_clip_proxies}
+    else:
+        support_reads = {site.read_name for site in local_clips} | insertion_reads
+
     if len(support_reads) < config.min_alt_support:
         return None, []
 
     inserted_sequence = dominant_sequence(indel.sequence for indel in local_insertions)
     if inserted_sequence == "NA":
-        # If no explicit CIGAR insertion exists, use short clipped sequence as a
-        # conservative filler-sequence proxy.
+        # If explicit insertion sequence is unavailable, a short terminal soft
+        # clip can still act as a filler-sequence proxy. Long clips are not used
+        # for NHEJ_INS length inference because they often mark unresolved split
+        # or mapping evidence.
         inserted_sequence = dominant_sequence(
-            site.clip_sequence
-            for site in local_clips
-            if site.clip_length <= config.max_insertion_length
+            site.clip_sequence for site in short_clip_proxies
         )
-    inserted_length: int | str = (
-        len(inserted_sequence)
-        if inserted_sequence != "NA"
-        else (
-            round(sum(site.clip_length for site in local_clips) / len(local_clips))
-            if local_clips
-            else "NA"
-        )
+    if inserted_sequence == "NA":
+        return None, []
+
+    inserted_length: int | str = len(inserted_sequence)
+    notes = (
+        "Candidate local NHEJ-like insertion with local CIGAR insertion evidence."
+        if insertion_reads
+        else "Candidate local NHEJ-like insertion from clipped filler-sequence evidence only."
     )
     event = RepairEvent(
         event_id=f"TMP_INS_{cluster.chrom}_{cluster.peak_pos}_{cluster.clip_side}",
@@ -381,7 +407,7 @@ def _classify_nhej_ins(
         treated_depth=cluster.treated_depth,
         control_depth=cluster.control_depth,
         normal_noise=cluster.normal_noise,
-        notes="Candidate local NHEJ-like insertion/filler sequence near a clipped breakpoint.",
+        notes=notes,
         support_read_names=support_reads,
     )
     event.score = _event_score(event)

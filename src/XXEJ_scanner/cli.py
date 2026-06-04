@@ -84,6 +84,8 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--max-local-event-distance", type=int, default=10000)
     scan.add_argument("--max-insertion-length", type=int, default=50)
     scan.add_argument("--min-indel-length", type=int, default=1)
+    scan.add_argument("--min-nhej-ins-indel-support", type=int, default=1)
+    scan.add_argument("--allow-clip-only-nhej-ins", action="store_true")
     scan.add_argument("--min-microhomology-length", type=int, default=1)
     scan.add_argument("--max-microhomology-length", type=int, default=20)
     scan.add_argument("--second-pass-window", type=int, default=150)
@@ -128,6 +130,8 @@ def _config_from_args(args: argparse.Namespace) -> ScannerConfig:
         max_local_event_distance=args.max_local_event_distance,
         max_insertion_length=args.max_insertion_length,
         min_indel_length=args.min_indel_length,
+        min_nhej_ins_indel_support=args.min_nhej_ins_indel_support,
+        allow_clip_only_nhej_ins=args.allow_clip_only_nhej_ins,
         min_microhomology_length=args.min_microhomology_length,
         max_microhomology_length=args.max_microhomology_length,
         second_pass_window=args.second_pass_window,
