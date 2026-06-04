@@ -51,6 +51,7 @@ class ScannerConfig:
     min_indel_length: int = 1
     min_microhomology_length: int = 1
     max_microhomology_length: int = 20
+    microhomology_search_window: int = 5
     second_pass_window: int = 150
     depth_count_method: str = "pileup"
 
@@ -203,6 +204,18 @@ class RepairEvent:
     filter: str = "NA"
     notes: str = ""
     normal_noise: float = 0.0
+    microhomology_left_end: int | str = "NA"
+    microhomology_right_start: int | str = "NA"
+    microhomology_offset_a: int | str = "NA"
+    microhomology_offset_b: int | str = "NA"
+    microhomology_deletion_start: int | str = "NA"
+    microhomology_deletion_end: int | str = "NA"
+    microhomology_deletion_length: int | str = "NA"
+    microhomology_ambiguity_bases: int = 0
+    microhomology_equivalent_hits: int = 0
+    microhomology_low_complexity: bool = False
+    junction_evidence_support: int = 0
+    junction_evidence_types: set[str] = field(default_factory=set)
     support_read_names: set[str] = field(default_factory=set, repr=False)
 
     @property

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import math
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 
 from .bam_evidence import dominant_sequence
 from .models import (
     BreakpointCluster,
     CandidateRegion,
+    ClipSite,
     CigarIndel,
     DiscordantPair,
     EventEvidence,
@@ -17,7 +19,7 @@ from .models import (
     ScannerConfig,
     SplitReadEvidence,
 )
-from .reference import ReferenceGenome, detect_microhomology
+from .reference import MicrohomologyHit, ReferenceGenome, find_microhomology
 
 
 def _near(pos_a: int, pos_b: int, window: int) -> bool:
@@ -28,10 +30,49 @@ def _cluster_side(cluster: BreakpointCluster) -> str:
     return cluster.clip_side
 
 
+@dataclass(slots=True)
+class _MmejPairCandidate:
+    left: BreakpointCluster
+    right: BreakpointCluster
+    microhomology: MicrohomologyHit
+    deletion_indels: list[CigarIndel]
+    split_reads: list[SplitReadEvidence]
+    remap_clips: list[ClipSite]
+    score: float
+    junction_evidence_types: set[str]
+
+    @property
+    def indel_support(self) -> int:
+        return len({indel.read_name for indel in self.deletion_indels})
+
+    @property
+    def junction_read_names(self) -> set[str]:
+        reads = {indel.read_name for indel in self.deletion_indels}
+        reads.update(split.read_name for split in self.split_reads)
+        reads.update(site.read_name for site in self.remap_clips)
+        return reads
+
+
+def _microhomology_score_bonus(length: int, low_complexity: bool = False) -> float:
+    if length <= 1:
+        return 0.0
+    if length <= 3:
+        bonus = 0.5
+    elif length <= 5:
+        bonus = 1.0
+    else:
+        bonus = 2.0
+    return min(bonus, 0.5) if low_complexity else bonus
+
+
 def _event_score(event: RepairEvent) -> float:
     # First-version scoring is deliberately transparent. It is a ranking aid for
     # review/IGV triage, not a calibrated probability or genotype likelihood.
-    microhomology_bonus = 1.0 if event.microhomology_length else 0.0
+    microhomology_bonus = _microhomology_score_bonus(
+        event.microhomology_length,
+        event.microhomology_low_complexity,
+    )
+    junction_bonus = math.log2(1 + event.junction_evidence_support)
     control_noise_penalty = event.normal_noise
     mapping_quality_penalty = 0.0
     return (
@@ -41,6 +82,7 @@ def _event_score(event: RepairEvent) -> float:
         + 2.5 * math.log2(1 + event.alt_discordant_pair_support)
         + 1.5 * math.log2(1 + event.alt_indel_support)
         + 1.0 * microhomology_bonus
+        + 1.0 * junction_bonus
         - 2.0 * control_noise_penalty
         - mapping_quality_penalty
     )
@@ -223,61 +265,114 @@ def _classify_mmej_del(
     if len(clusters) < 2:
         return events, event_evidence, used
 
-    # Select the strongest same-chromosome cluster pair within the configured
-    # local-event distance. This keeps the first version simple and avoids
-    # enumerating many overlapping deletion hypotheses from one noisy region.
-    best_pair: tuple[BreakpointCluster, BreakpointCluster, int] | None = None
-    best_support = -1
-    for idx, left in enumerate(clusters):
-        for right in clusters[idx + 1 :]:
+    # Score deletion-compatible pairs after normalizing genomic left/right order.
+    # Microhomology remains contextual evidence, but it now helps select the most
+    # MMEJ-like pair when several local breakpoint hypotheses overlap.
+    best_candidate: _MmejPairCandidate | None = None
+    ordered_clusters = sorted(
+        clusters,
+        key=lambda cluster: (cluster.chrom, cluster.peak_pos),
+    )
+    for idx, cluster_a in enumerate(ordered_clusters):
+        for cluster_b in ordered_clusters[idx + 1 :]:
+            left, right = sorted(
+                (cluster_a, cluster_b),
+                key=lambda cluster: cluster.peak_pos,
+            )
             if left.chrom != right.chrom:
+                continue
+            if not _is_deletion_compatible_pair(left, right):
                 continue
             distance = abs(right.peak_pos - left.peak_pos)
             if distance <= 0 or distance > config.max_local_event_distance:
                 continue
-            deletion_support = _indels_near_pair(
-                evidence.indels, left.peak_pos, right.peak_pos, config
+
+            mh_hit = find_microhomology(
+                reference,
+                left.chrom,
+                left.peak_pos,
+                right.peak_pos,
+                config.min_microhomology_length,
+                config.max_microhomology_length,
+                config.microhomology_search_window,
             )
-            support = (
-                left.clip_count
-                + right.clip_count
-                + len({indel.read_name for indel in deletion_support})
+            deletion_start, deletion_end = _expected_deletion_span(
+                left,
+                right,
+                mh_hit,
             )
-            if support > best_support:
-                best_pair = (
+            deletion_indels = _indels_matching_deletion_span(
+                evidence.indels,
+                left.chrom,
+                deletion_start,
+                deletion_end,
+                config,
+            )
+            split_reads = _split_reads_matching_deletion_span(
+                evidence.split_reads,
+                left.chrom,
+                deletion_start,
+                deletion_end,
+                config,
+            )
+            remap_clips = _soft_clips_matching_opposite_flanks(
+                evidence.clip_sites,
+                reference,
+                left,
+                right,
+                deletion_start,
+                deletion_end,
+                config,
+            )
+            junction_types = _junction_evidence_types(
+                deletion_indels,
+                split_reads,
+                remap_clips,
+            )
+            candidate = _MmejPairCandidate(
+                left=left,
+                right=right,
+                microhomology=mh_hit,
+                deletion_indels=deletion_indels,
+                split_reads=split_reads,
+                remap_clips=remap_clips,
+                score=_mmej_pair_score(
                     left,
                     right,
-                    len({indel.read_name for indel in deletion_support}),
-                )
-                best_support = support
+                    mh_hit,
+                    deletion_indels,
+                    split_reads,
+                    remap_clips,
+                ),
+                junction_evidence_types=junction_types,
+            )
+            if best_candidate is None or _mmej_candidate_key(
+                candidate
+            ) > _mmej_candidate_key(best_candidate):
+                best_candidate = candidate
 
-    if best_pair is None:
+    if best_candidate is None:
         return events, event_evidence, used
 
-    left, right, indel_support = best_pair
-    # Microhomology is reference-context evidence. It boosts interpretation but
-    # is not required on its own to create a candidate event.
-    mh_seq, mh_len = detect_microhomology(
-        reference,
-        left.chrom,
-        left.peak_pos,
-        right.peak_pos,
-        config.min_microhomology_length,
-        config.max_microhomology_length,
-    )
-    support_reads = {
-        site.read_name
+    left = best_candidate.left
+    right = best_candidate.right
+    mh_hit = best_candidate.microhomology
+    local_clips = [
+        site
         for site in evidence.clip_sites
         if site.chrom == left.chrom
         and (
             _near(site.pos, left.peak_pos, config.clip_cluster_window)
             or _near(site.pos, right.peak_pos, config.clip_cluster_window)
         )
+    ]
+    support_reads = {
+        site.read_name
+        for site in local_clips
     }
-    deletion_indels = _indels_near_pair(
-        evidence.indels, left.peak_pos, right.peak_pos, config
-    )
-    support_reads.update(indel.read_name for indel in deletion_indels)
+    support_reads.update(indel.read_name for indel in best_candidate.deletion_indels)
+    support_reads.update(split.read_name for split in best_candidate.split_reads)
+    support_reads.update(site.read_name for site in best_candidate.remap_clips)
     if len(support_reads) < config.min_alt_support:
         return events, event_evidence, used
 
@@ -294,29 +389,134 @@ def _classify_mmej_del(
         bkp_B_pos=right.peak_pos,
         bkp_B_side=_cluster_side(right),
         deleted_length=abs(right.peak_pos - left.peak_pos),
-        microhomology=mh_seq,
-        microhomology_length=mh_len,
+        microhomology=mh_hit.sequence,
+        microhomology_length=mh_hit.length,
         alt_clip_support=left.clip_count + right.clip_count,
-        alt_indel_support=indel_support,
+        alt_split_support=len({split.read_name for split in best_candidate.split_reads}),
+        alt_indel_support=best_candidate.indel_support,
         treated_depth=max(left.treated_depth, right.treated_depth),
         control_depth=max(left.control_depth, right.control_depth),
         normal_noise=max(left.normal_noise, right.normal_noise),
-        notes="Candidate local deletion with breakpoint clusters and microhomology context.",
+        notes=_mmej_notes(mh_hit, best_candidate.junction_evidence_types),
+        microhomology_left_end=mh_hit.left_end if mh_hit.found else "NA",
+        microhomology_right_start=mh_hit.right_start if mh_hit.found else "NA",
+        microhomology_offset_a=mh_hit.offset_a if mh_hit.found else "NA",
+        microhomology_offset_b=mh_hit.offset_b if mh_hit.found else "NA",
+        microhomology_deletion_start=mh_hit.deletion_start if mh_hit.found else "NA",
+        microhomology_deletion_end=mh_hit.deletion_end if mh_hit.found else "NA",
+        microhomology_deletion_length=mh_hit.deletion_length if mh_hit.found else "NA",
+        microhomology_ambiguity_bases=mh_hit.ambiguity_bases,
+        microhomology_equivalent_hits=mh_hit.equivalent_hit_count,
+        microhomology_low_complexity=mh_hit.low_complexity,
+        junction_evidence_support=len(best_candidate.junction_read_names),
+        junction_evidence_types=best_candidate.junction_evidence_types,
         support_read_names=support_reads,
     )
     event.score = _event_score(event)
     events.append(event)
-    for cluster_pos in (left.peak_pos, right.peak_pos):
-        for site in evidence.clip_sites:
-            if site.chrom == left.chrom and _near(
-                site.pos, cluster_pos, config.clip_cluster_window
-            ):
-                event_evidence.append(_clip_evidence(event.event_id, site))
-    for indel in deletion_indels:
+    for site in local_clips:
+        event_evidence.append(_clip_evidence(event.event_id, site))
+    for indel in best_candidate.deletion_indels:
         event_evidence.append(_indel_evidence(event.event_id, indel))
+    for split in best_candidate.split_reads:
+        event_evidence.append(_split_evidence(event.event_id, split))
     used.add((left.chrom, left.peak_pos, left.clip_side))
     used.add((right.chrom, right.peak_pos, right.clip_side))
     return events, event_evidence, used
+
+
+def _is_deletion_compatible_pair(
+    left: BreakpointCluster,
+    right: BreakpointCluster,
+) -> bool:
+    return left.clip_side in {"right_clip", "both"} and right.clip_side in {
+        "left_clip",
+        "both",
+    }
+
+
+def _orientation_bonus(left: BreakpointCluster, right: BreakpointCluster) -> float:
+    if left.clip_side == "right_clip" and right.clip_side == "left_clip":
+        return 2.0
+    return 1.0
+
+
+def _expected_deletion_span(
+    left: BreakpointCluster,
+    right: BreakpointCluster,
+    hit: MicrohomologyHit,
+) -> tuple[int, int]:
+    if hit.found:
+        return hit.deletion_start, hit.deletion_end
+    return left.peak_pos, right.peak_pos
+
+
+def _mmej_pair_score(
+    left: BreakpointCluster,
+    right: BreakpointCluster,
+    hit: MicrohomologyHit,
+    deletion_indels: list[CigarIndel],
+    split_reads: list[SplitReadEvidence],
+    remap_clips: list[ClipSite],
+) -> float:
+    clip_support = left.clip_count + right.clip_count
+    indel_support = len({indel.read_name for indel in deletion_indels})
+    junction_reads = {indel.read_name for indel in deletion_indels}
+    junction_reads.update(split.read_name for split in split_reads)
+    junction_reads.update(site.read_name for site in remap_clips)
+    return (
+        clip_support
+        + 1.5 * indel_support
+        + 2.0 * len(junction_reads)
+        + _microhomology_score_bonus(hit.length, hit.low_complexity)
+        + _orientation_bonus(left, right)
+        - 2.0 * max(left.normal_noise, right.normal_noise)
+    )
+
+
+def _mmej_candidate_key(
+    candidate: _MmejPairCandidate,
+) -> tuple[float, int, int, int, int]:
+    return (
+        candidate.score,
+        len(candidate.junction_read_names),
+        candidate.microhomology.length,
+        candidate.left.clip_count + candidate.right.clip_count,
+        -abs(candidate.right.peak_pos - candidate.left.peak_pos),
+    )
+
+
+def _junction_evidence_types(
+    deletion_indels: list[CigarIndel],
+    split_reads: list[SplitReadEvidence],
+    remap_clips: list[ClipSite],
+) -> set[str]:
+    evidence_types: set[str] = set()
+    if deletion_indels:
+        evidence_types.add("cigar_del")
+    if split_reads:
+        evidence_types.add("split_read_sa")
+    if remap_clips:
+        evidence_types.add("soft_clip_remap")
+    return evidence_types
+
+
+def _mmej_notes(hit: MicrohomologyHit, junction_evidence_types: set[str]) -> str:
+    notes = ["Candidate local deletion-like event from paired breakpoint clusters."]
+    if hit.found:
+        notes.append("Reference microhomology context detected.")
+    else:
+        notes.append("No reference microhomology detected near the nominal breakpoints.")
+    if junction_evidence_types:
+        evidence = ",".join(sorted(junction_evidence_types))
+        notes.append(f"Junction-level evidence types: {evidence}.")
+    else:
+        notes.append("No junction-level read evidence detected.")
+    if hit.equivalent_hit_count > 1:
+        notes.append(f"{hit.equivalent_hit_count} equivalent microhomology placements.")
+    if hit.low_complexity:
+        notes.append("Microhomology sequence is low-complexity.")
+    return " ".join(notes)
 
 
 def _classify_nhej_ins(
@@ -390,22 +590,122 @@ def _classify_nhej_ins(
     return event, ev_rows
 
 
-def _indels_near_pair(
+def _indels_matching_deletion_span(
     indels: list[CigarIndel],
-    left_pos: int,
-    right_pos: int,
+    chrom: str,
+    deletion_start: int,
+    deletion_end: int,
     config: ScannerConfig,
 ) -> list[CigarIndel]:
-    # A deletion CIGAR may not exactly match clipped peak positions, so use the
-    # cluster window as tolerance on both sides.
-    lo, hi = sorted((left_pos, right_pos))
     return [
         indel
         for indel in indels
-        if indel.operation == "DEL"
-        and indel.start <= hi + config.clip_cluster_window
-        and indel.end >= lo - config.clip_cluster_window
+        if indel.chrom == chrom
+        and indel.operation == "DEL"
+        and _near(indel.start, deletion_start, config.clip_cluster_window)
+        and _near(indel.end, deletion_end, config.clip_cluster_window)
     ]
+
+
+def _split_reads_matching_deletion_span(
+    splits: list[SplitReadEvidence],
+    chrom: str,
+    deletion_start: int,
+    deletion_end: int,
+    config: ScannerConfig,
+) -> list[SplitReadEvidence]:
+    window = config.clip_cluster_window * 2
+    return [
+        split
+        for split in splits
+        if split.chrom == chrom
+        and split.remote_chrom == chrom
+        and (
+            (
+                _near(split.pos, deletion_start, window)
+                and _near(split.remote_pos, deletion_end, window)
+            )
+            or (
+                _near(split.pos, deletion_end, window)
+                and _near(split.remote_pos, deletion_start, window)
+            )
+        )
+    ]
+
+
+def _soft_clips_matching_opposite_flanks(
+    sites: list[ClipSite],
+    reference: ReferenceGenome,
+    left: BreakpointCluster,
+    right: BreakpointCluster,
+    deletion_start: int,
+    deletion_end: int,
+    config: ScannerConfig,
+) -> list[ClipSite]:
+    matches: list[ClipSite] = []
+    for site in sites:
+        if site.chrom != left.chrom:
+            continue
+        if (
+            site.side == "right_clip"
+            and _near(site.pos, left.peak_pos, config.clip_cluster_window)
+            and _right_clip_matches_flank(
+                reference,
+                site.chrom,
+                deletion_end,
+                site.clip_sequence,
+                config,
+            )
+        ):
+            matches.append(site)
+            continue
+        if (
+            site.side == "left_clip"
+            and _near(site.pos, right.peak_pos, config.clip_cluster_window)
+            and _left_clip_matches_flank(
+                reference,
+                site.chrom,
+                deletion_start,
+                site.clip_sequence,
+                config,
+            )
+        ):
+            matches.append(site)
+    return matches
+
+
+def _right_clip_matches_flank(
+    reference: ReferenceGenome,
+    chrom: str,
+    flank_start: int,
+    clipped_sequence: str,
+    config: ScannerConfig,
+) -> bool:
+    sequence = clipped_sequence.upper()
+    if not sequence or sequence == "NA":
+        return False
+    match_len = min(len(sequence), config.clip_cluster_window)
+    if match_len < min(config.min_clip_length, len(sequence)):
+        return False
+    flank = reference.fetch(chrom, flank_start, flank_start + match_len)
+    return len(flank) == match_len and sequence[:match_len] == flank
+
+
+def _left_clip_matches_flank(
+    reference: ReferenceGenome,
+    chrom: str,
+    flank_end: int,
+    clipped_sequence: str,
+    config: ScannerConfig,
+) -> bool:
+    sequence = clipped_sequence.upper()
+    if not sequence or sequence == "NA":
+        return False
+    match_len = min(len(sequence), config.clip_cluster_window)
+    if match_len < min(config.min_clip_length, len(sequence)):
+        return False
+    flank = reference.fetch(chrom, flank_end - match_len, flank_end)
+    return len(flank) == match_len and sequence[-match_len:] == flank
 
 
 def _clip_evidence(event_id: str, site: object) -> EventEvidence:

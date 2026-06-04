@@ -116,6 +116,18 @@ def write_events_tsv(path: str, events: Iterable[RepairEvent]) -> None:
         "score",
         "filter",
         "notes",
+        "microhomology_left_end",
+        "microhomology_right_start",
+        "microhomology_offset_a",
+        "microhomology_offset_b",
+        "microhomology_deletion_start",
+        "microhomology_deletion_end",
+        "microhomology_deletion_length",
+        "microhomology_ambiguity_bases",
+        "microhomology_equivalent_hits",
+        "microhomology_low_complexity",
+        "junction_evidence_support",
+        "junction_evidence_types",
     ]
     _write_dataclass_tsv(path, fields, events)
 

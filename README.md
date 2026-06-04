@@ -48,6 +48,7 @@ Optional:
 --sample-name treated
 --control-name control
 --depth-count-method pileup
+--microhomology-search-window 5
 --include-supplementary
 ```
 
@@ -99,6 +100,8 @@ igv_loci.bed
 
 Coordinates are 0-based half-open for BED-like intervals. Breakpoint positions are reported as 0-based reference positions derived from alignment starts for left clips and alignment ends for right clips.
 
+For `MMEJ_DEL`, the original `start`, `end`, and `deleted_length` columns keep the nominal paired-cluster interval. Additional `microhomology_*` columns report the breakpoint-adjusted microhomology placement, the implied deletion span when one microhomology copy is collapsed, equivalent-placement count, and low-complexity status. `junction_evidence_support` and `junction_evidence_types` summarize read-level evidence that is consistent with the local deletion junction, such as matched CIGAR deletions, same-chromosome SA-tag split reads, or soft clips that match the opposite flank.
+
 Depth columns in `breakpoint_clusters.tsv` and `events.tsv` report local depth around the clustered breakpoint window, not depth across the full candidate region. With `--depth-count-method pileup`, the scanner reports mean base-level pileup depth across that local window. With `--depth-count-method region`, it reports the number of unique read names overlapping the local window, which is similar to the original molecule/read support count.
 
 By default, discovery filters use mapped, primary, non-secondary alignments that pass MAPQ and aligned-length thresholds. Duplicate reads are excluded unless `--allow-duplicates` is set. Supplementary alignments are excluded unless `--include-supplementary` is set; SA tags on primary alignments are still parsed for split-read evidence.
@@ -107,7 +110,7 @@ By default, discovery filters use mapped, primary, non-secondary alignments that
 
 `NHEJ_INS` marks a candidate local end-joining event with small inserted or filler sequence evidence near a clipped breakpoint.
 
-`MMEJ_DEL` marks a candidate local deletion event with paired local breakpoint evidence and reference microhomology context.
+`MMEJ_DEL` marks a candidate local deletion-like event with paired local breakpoint evidence and reference microhomology context. It is intended as a reviewable MMEJ-like candidate call, not a proof that every supporting read directly resolves the repaired junction.
 
 `NHEJ_BND_INS_INTRA` and `NHEJ_BND_INS_INTER` mark candidate wrong-end joining supported by local clipping plus distant same-chromosome or inter-chromosome split/paired evidence.
 
