@@ -77,7 +77,6 @@ def passes_read_filters(
     read: object,
     config: ScannerConfig,
     *,
-    include_supplementary: bool = False,
     min_mapq: int | None = None,
 ) -> bool:
     # These are discovery filters. Supplementary reads are skipped here because
@@ -87,7 +86,7 @@ def passes_read_filters(
         return False
     if getattr(read, "is_secondary", False):
         return False
-    if getattr(read, "is_supplementary", False) and not include_supplementary:
+    if getattr(read, "is_supplementary", False) and not config.include_supplementary:
         return False
     if getattr(read, "is_duplicate", False) and not config.allow_duplicates:
         return False
@@ -408,7 +407,6 @@ def iter_bam_records(
         if passes_read_filters(
             read,
             config,
-            include_supplementary=include_supplementary,
             min_mapq=min_mapq,
         ):
             yield read
@@ -451,7 +449,7 @@ def collect_region_evidence(
     return evidence
 
 
-def count_depth(
+def _count_read_name_depth(
     bam_path: str,
     chrom: str,
     start: int,
@@ -460,17 +458,136 @@ def count_depth(
     *,
     min_mapq: int | None = None,
 ) -> int:
-    # Count unique read names rather than pileup bases. This is a simple local
-    # molecule/read support measure and is less inflated by read length.
+    """Count unique read names overlapping a genomic region."""
     read_names: set[str] = set()
+
     with pysam.AlignmentFile(bam_path, "rb") as bam:
         for read in iter_bam_records(
-            bam, chrom, clamp_start(start), end, config, min_mapq=min_mapq
+            bam, chrom, start, end, config, min_mapq=min_mapq
         ):
             if get_reference_end(read) <= start or int(read.reference_start) >= end:
                 continue
+
             read_names.add(str(read.query_name))
+
     return len(read_names)
+
+
+def _count_mean_pileup_depth(
+    bam_path: str,
+    chrom: str,
+    start: int,
+    end: int,
+    config: ScannerConfig,
+    *,
+    min_mapq: int | None = None,
+) -> float:
+    """Calculate mean pileup depth across a genomic region."""
+    total_depth = 0
+    region_length = end - start
+    mapq_threshold = config.min_mapq if min_mapq is None else min_mapq
+
+    with pysam.AlignmentFile(bam_path, "rb") as bam:
+        for column in bam.pileup(
+            chrom,
+            start,
+            end,
+            truncate=True,
+            stepper="all",
+            min_mapping_quality=mapq_threshold,
+        ):
+            column_depth = 0
+
+            for pileup_read in column.pileups:
+                read = pileup_read.alignment
+
+                if read.is_unmapped:
+                    continue
+
+                if read.is_secondary or read.is_supplementary:
+                    continue
+
+                if read.is_duplicate and not config.allow_duplicates:
+                    continue
+
+                if read.mapping_quality < mapq_threshold:
+                    continue
+
+                if pileup_read.is_del:
+                    continue
+
+                if pileup_read.is_refskip:
+                    continue
+
+                column_depth += 1
+
+            total_depth += column_depth
+
+    return total_depth / region_length
+
+
+def count_depth(
+    bam_path: str,
+    chrom: str,
+    start: int,
+    end: int,
+    config: ScannerConfig,
+    *,
+    min_mapq: int | None = None,
+) -> float:
+    """Count local depth in a genomic region.
+
+    Parameters
+    ----------
+    bam_path
+        Input BAM path.
+    chrom
+        Reference contig name.
+    start
+        Region start coordinate.
+    end
+        Region end coordinate.
+    config
+        Scanner configuration.
+        - config.depth_count_method = "region": count unique read names overlapping the region.
+        - config.depth_count_method = "pileup": calculate mean pileup depth across the region.
+    min_mapq
+        Optional mapping quality threshold. If None, config.min_mapq is used.
+
+    Returns
+    -------
+    float
+        Local depth value. The "region" method returns an integer-like
+        float, while the "pileup" method returns mean base-level depth.
+    """
+    start = clamp_start(start)
+
+    if end <= start:
+        return 0.0
+
+    method = config.depth_count_method
+    if method == "region":
+        return float(
+            _count_read_name_depth(
+                bam_path,
+                chrom,
+                start,
+                end,
+                config,
+                min_mapq=min_mapq,
+            )
+        )
+    if method == "pileup":
+        return _count_mean_pileup_depth(
+            bam_path,
+            chrom,
+            start,
+            end,
+            config,
+            min_mapq=min_mapq,
+        )
+
+    raise ValueError(f"Unsupported depth counting method: {method!r}")
 
 
 def count_spanning_reads(

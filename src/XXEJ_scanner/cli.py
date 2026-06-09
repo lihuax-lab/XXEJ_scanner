@@ -11,7 +11,7 @@ from .breakpoints import (
     filter_breakpoint_clusters,
     score_breakpoint_cluster,
 )
-from .classify import classify_local_events
+from .classify import assign_final_event_ids, classify_local_events
 from .coverage import (
     annotate_region_coverage,
     call_candidate_regions,
@@ -78,14 +78,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--library-orientation", choices=["fr", "rf", "ff", "rr", "any"], default="fr"
     )
     scan.add_argument("--allow-duplicates", action="store_true")
+    scan.add_argument("--include-supplementary", action="store_true")
     scan.add_argument("--min-aligned-length", type=int, default=20)
     scan.add_argument("--scan-padding", type=int, default=200)
     scan.add_argument("--max-local-event-distance", type=int, default=10000)
     scan.add_argument("--max-insertion-length", type=int, default=50)
     scan.add_argument("--min-indel-length", type=int, default=1)
+    scan.add_argument("--min-nhej-ins-indel-support", type=int, default=1)
+    scan.add_argument("--allow-clip-only-nhej-ins", action="store_true")
     scan.add_argument("--min-microhomology-length", type=int, default=1)
     scan.add_argument("--max-microhomology-length", type=int, default=20)
+    scan.add_argument("--microhomology-search-window", type=int, default=5)
     scan.add_argument("--second-pass-window", type=int, default=150)
+    scan.add_argument(
+        "--depth-count-method", choices=["pileup", "region"], default="pileup"
+    )
     return parser
 
 
@@ -118,14 +125,19 @@ def _config_from_args(args: argparse.Namespace) -> ScannerConfig:
         discordant_min_distance=args.discordant_min_distance,
         library_orientation=args.library_orientation,
         allow_duplicates=args.allow_duplicates,
+        include_supplementary=args.include_supplementary,
         min_aligned_length=args.min_aligned_length,
         scan_padding=args.scan_padding,
         max_local_event_distance=args.max_local_event_distance,
         max_insertion_length=args.max_insertion_length,
         min_indel_length=args.min_indel_length,
+        min_nhej_ins_indel_support=args.min_nhej_ins_indel_support,
+        allow_clip_only_nhej_ins=args.allow_clip_only_nhej_ins,
         min_microhomology_length=args.min_microhomology_length,
         max_microhomology_length=args.max_microhomology_length,
+        microhomology_search_window=args.microhomology_search_window,
         second_pass_window=args.second_pass_window,
+        depth_count_method=args.depth_count_method,
     )
 
 
@@ -249,6 +261,8 @@ def run_scan(config: ScannerConfig) -> dict[str, object]:
                 event = second_pass_validate_event(event, config.treated_bam, config)
                 all_events.append(event)
             all_event_evidence.extend(event_evidence)
+
+    assign_final_event_ids(all_events, all_event_evidence)
 
     log("[6/6] Writing outputs")
     write_candidate_regions_bed(output_paths["candidate_regions"], regions)

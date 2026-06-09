@@ -43,14 +43,19 @@ class ScannerConfig:
     discordant_min_distance: int = 1000
     library_orientation: str = "fr"
     allow_duplicates: bool = False
+    include_supplementary: bool = False
     min_aligned_length: int = 20
     scan_padding: int = 200
     max_local_event_distance: int = 10000
     max_insertion_length: int = 50
     min_indel_length: int = 1
+    min_nhej_ins_indel_support: int = 1
+    allow_clip_only_nhej_ins: bool = False
     min_microhomology_length: int = 1
     max_microhomology_length: int = 20
+    microhomology_search_window: int = 5
     second_pass_window: int = 150
+    depth_count_method: str = "pileup"
 
 
 @dataclass(slots=True)
@@ -154,8 +159,8 @@ class BreakpointCluster:
     clip_count: int
     left_clip_count: int
     right_clip_count: int
-    treated_depth: int = 0
-    control_depth: int = 0
+    treated_depth: float = 0.0
+    control_depth: float = 0.0
     clip_rate: float = 0.0
     strand_plus_count: int = 0
     strand_minus_count: int = 0
@@ -201,6 +206,18 @@ class RepairEvent:
     filter: str = "NA"
     notes: str = ""
     normal_noise: float = 0.0
+    microhomology_left_end: int | str = "NA"
+    microhomology_right_start: int | str = "NA"
+    microhomology_offset_a: int | str = "NA"
+    microhomology_offset_b: int | str = "NA"
+    microhomology_deletion_start: int | str = "NA"
+    microhomology_deletion_end: int | str = "NA"
+    microhomology_deletion_length: int | str = "NA"
+    microhomology_ambiguity_bases: int = 0
+    microhomology_equivalent_hits: int = 0
+    microhomology_low_complexity: bool = False
+    junction_evidence_support: int = 0
+    junction_evidence_types: set[str] = field(default_factory=set)
     support_read_names: set[str] = field(default_factory=set, repr=False)
 
     @property
