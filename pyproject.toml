@@ -3,9 +3,13 @@ name = "xxej-scanner"
 version = "0.1.0"
 description = "Rule-based scanner for CUT&Tag-enriched XXEJ repair-associated events."
 readme = "README.md"
+license = "GPL-3.0-or-later"
 requires-python = ">=3.10"
 dependencies = [
     "pysam>=0.22.0",
+]
+classifiers = [
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
 ]
 
 [project.scripts]
