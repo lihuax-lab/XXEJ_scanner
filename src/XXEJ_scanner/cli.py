@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .bam_evidence import clip_site_count_near, collect_region_evidence, count_depth
 from .breakpoints import (
+    cluster_evidence_graph,
     cluster_clip_sites,
     filter_breakpoint_clusters,
     score_breakpoint_cluster,
@@ -63,6 +64,17 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--strict-min-mapq", type=int, default=30)
     scan.add_argument("--min-clip-length", type=int, default=10)
     scan.add_argument("--clip-cluster-window", type=int, default=20)
+    scan.add_argument(
+        "--cluster-method",
+        choices=["window", "evidence-graph"],
+        default="window",
+        help=(
+            "Breakpoint clustering method. 'window' uses proximity-only soft "
+            "clip clusters; 'evidence-graph' uses lightweight graph community "
+            "detection to link nearby clipped observations supported by local "
+            "indel, split-read, or discordant-pair evidence."
+        ),
+    )
     scan.add_argument("--coverage-bin-size", type=int, default=100)
     scan.add_argument("--merge-distance", type=int, default=300)
     scan.add_argument("--max-normal-clip-rate", type=float, default=0.05)
@@ -112,6 +124,7 @@ def _config_from_args(args: argparse.Namespace) -> ScannerConfig:
         strict_min_mapq=args.strict_min_mapq,
         min_clip_length=args.min_clip_length,
         clip_cluster_window=args.clip_cluster_window,
+        cluster_method=args.cluster_method,
         coverage_bin_size=args.coverage_bin_size,
         merge_distance=args.merge_distance,
         max_normal_clip_rate=args.max_normal_clip_rate,
@@ -186,9 +199,14 @@ def run_scan(config: ScannerConfig) -> dict[str, object]:
             raw_split_reads.extend(treated_evidence.split_reads)
 
             log("[4/6] Clustering breakpoints")
-            clusters = cluster_clip_sites(
-                treated_evidence.clip_sites, config, region=region
-            )
+            if config.cluster_method == "evidence-graph":
+                clusters = cluster_evidence_graph(
+                    treated_evidence, config, region=region
+                )
+            else:
+                clusters = cluster_clip_sites(
+                    treated_evidence.clip_sites, config, region=region
+                )
             for cluster in clusters:
                 # Depth is counted around the cluster, not across the whole
                 # enriched region, because CUT&Tag peaks can be highly uneven.
@@ -282,6 +300,7 @@ def run_scan(config: ScannerConfig) -> dict[str, object]:
         "control_bam": str(Path(config.control_bam)) if config.control_bam else None,
         "reference_fasta": str(Path(config.reference_fasta)),
         "candidate_regions": len(regions),
+        "cluster_method": config.cluster_method,
         "breakpoint_clusters": len(all_clusters),
         "events": len(all_events),
         "pass_events": sum(1 for event in all_events if event.filter == "PASS"),

@@ -462,9 +462,7 @@ def _count_read_name_depth(
     read_names: set[str] = set()
 
     with pysam.AlignmentFile(bam_path, "rb") as bam:
-        for read in iter_bam_records(
-            bam, chrom, start, end, config, min_mapq=min_mapq
-        ):
+        for read in iter_bam_records(bam, chrom, start, end, config, min_mapq=min_mapq):
             if get_reference_end(read) <= start or int(read.reference_start) >= end:
                 continue
 

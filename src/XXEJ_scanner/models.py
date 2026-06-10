@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 ClipSide = Literal["left_clip", "right_clip"]
+ClusterMethod = Literal["window", "evidence-graph"]
 EventType = Literal[
     "NHEJ_INS",
     "MMEJ_DEL",
@@ -30,6 +31,7 @@ class ScannerConfig:
     strict_min_mapq: int = 30
     min_clip_length: int = 10
     clip_cluster_window: int = 20
+    cluster_method: ClusterMethod = "window"
     coverage_bin_size: int = 100
     merge_distance: int = 300
     max_normal_clip_rate: float = 0.05
