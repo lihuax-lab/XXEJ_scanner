@@ -292,10 +292,12 @@ def _classify_mmej_del(
     if len(clusters) < 2:
         return events, event_evidence, used
 
-    # Score deletion-compatible pairs after normalizing genomic left/right order.
-    # Microhomology remains contextual evidence, but it now helps select the most
-    # MMEJ-like pair when several local breakpoint hypotheses overlap.
-    best_candidate: _MmejPairCandidate | None = None
+    # Score all deletion-compatible pairs, then greedily consume them in
+    # descending score order. Two candidates are mutually exclusive when they
+    # share a cluster (a cluster can anchor at most one deletion breakpoint).
+    # This allows independent deletions within the same enrichment region to be
+    # reported rather than discarding all but the highest-scoring pair.
+    all_candidates: list[_MmejPairCandidate] = []
     ordered_clusters = sorted(
         clusters,
         key=lambda cluster: (cluster.chrom, cluster.peak_pos),
@@ -373,82 +375,86 @@ def _classify_mmej_del(
                 ),
                 junction_evidence_types=junction_types,
             )
-            if best_candidate is None or _mmej_candidate_key(
-                candidate
-            ) > _mmej_candidate_key(best_candidate):
-                best_candidate = candidate
+            all_candidates.append(candidate)
 
-    if best_candidate is None:
+    if not all_candidates:
         return events, event_evidence, used
 
-    left = best_candidate.left
-    right = best_candidate.right
-    mh_hit = best_candidate.microhomology
-    local_clips = [
-        site
-        for site in evidence.clip_sites
-        if site.chrom == left.chrom
-        and (
-            _near(site.pos, left.peak_pos, config.clip_cluster_window)
-            or _near(site.pos, right.peak_pos, config.clip_cluster_window)
+    # Greedy selection: sort descending by score key, then consume compatible
+    # pairs one at a time, skipping any whose clusters are already used.
+    all_candidates.sort(key=_mmej_candidate_key, reverse=True)
+    for candidate in all_candidates:
+        left = candidate.left
+        right = candidate.right
+        left_key = (left.chrom, left.peak_pos, left.clip_side)
+        right_key = (right.chrom, right.peak_pos, right.clip_side)
+        if left_key in used or right_key in used:
+            continue
+
+        mh_hit = candidate.microhomology
+        local_clips = [
+            site
+            for site in evidence.clip_sites
+            if site.chrom == left.chrom
+            and (
+                _near(site.pos, left.peak_pos, config.clip_cluster_window)
+                or _near(site.pos, right.peak_pos, config.clip_cluster_window)
+            )
+        ]
+        support_reads = {site.read_name for site in local_clips}
+        support_reads.update(indel.read_name for indel in candidate.deletion_indels)
+        support_reads.update(split.read_name for split in candidate.split_reads)
+        support_reads.update(site.read_name for site in candidate.remap_clips)
+        if len(support_reads) < config.min_alt_support:
+            continue
+
+        event = RepairEvent(
+            event_id=f"TMP_MMEJ_{region.region_id}_{left.chrom}_{left.peak_pos}_{right.peak_pos}",
+            event_type="MMEJ_DEL",
+            chrom=left.chrom,
+            start=min(left.peak_pos, right.peak_pos),
+            end=max(left.peak_pos, right.peak_pos),
+            bkp_A_chrom=left.chrom,
+            bkp_A_pos=left.peak_pos,
+            bkp_A_side=_cluster_side(left),
+            bkp_B_chrom=right.chrom,
+            bkp_B_pos=right.peak_pos,
+            bkp_B_side=_cluster_side(right),
+            deleted_length=abs(right.peak_pos - left.peak_pos),
+            microhomology=mh_hit.sequence,
+            microhomology_length=mh_hit.length,
+            alt_clip_support=left.clip_count + right.clip_count,
+            alt_split_support=len({split.read_name for split in candidate.split_reads}),
+            alt_indel_support=candidate.indel_support,
+            treated_depth=max(left.treated_depth, right.treated_depth),
+            control_depth=max(left.control_depth, right.control_depth),
+            normal_noise=max(left.normal_noise, right.normal_noise),
+            notes=_mmej_notes(mh_hit, candidate.junction_evidence_types),
+            microhomology_left_end=mh_hit.left_end if mh_hit.found else "NA",
+            microhomology_right_start=mh_hit.right_start if mh_hit.found else "NA",
+            microhomology_offset_a=mh_hit.offset_a if mh_hit.found else "NA",
+            microhomology_offset_b=mh_hit.offset_b if mh_hit.found else "NA",
+            microhomology_deletion_start=mh_hit.deletion_start if mh_hit.found else "NA",
+            microhomology_deletion_end=mh_hit.deletion_end if mh_hit.found else "NA",
+            microhomology_deletion_length=mh_hit.deletion_length if mh_hit.found else "NA",
+            microhomology_ambiguity_bases=mh_hit.ambiguity_bases,
+            microhomology_equivalent_hits=mh_hit.equivalent_hit_count,
+            microhomology_low_complexity=mh_hit.low_complexity,
+            junction_evidence_support=len(candidate.junction_read_names),
+            junction_evidence_types=candidate.junction_evidence_types,
+            support_read_names=support_reads,
         )
-    ]
-    support_reads = {
-        site.read_name
-        for site in local_clips
-    }
-    support_reads.update(indel.read_name for indel in best_candidate.deletion_indels)
-    support_reads.update(split.read_name for split in best_candidate.split_reads)
-    support_reads.update(site.read_name for site in best_candidate.remap_clips)
-    if len(support_reads) < config.min_alt_support:
-        return events, event_evidence, used
+        event.score = _event_score(event)
+        events.append(event)
+        for site in local_clips:
+            event_evidence.append(_clip_evidence(event.event_id, site))
+        for indel in candidate.deletion_indels:
+            event_evidence.append(_indel_evidence(event.event_id, indel))
+        for split in candidate.split_reads:
+            event_evidence.append(_split_evidence(event.event_id, split))
+        used.add(left_key)
+        used.add(right_key)
 
-    event = RepairEvent(
-        event_id=f"TMP_MMEJ_{region.region_id}_{left.chrom}_{left.peak_pos}_{right.peak_pos}",
-        event_type="MMEJ_DEL",
-        chrom=left.chrom,
-        start=min(left.peak_pos, right.peak_pos),
-        end=max(left.peak_pos, right.peak_pos),
-        bkp_A_chrom=left.chrom,
-        bkp_A_pos=left.peak_pos,
-        bkp_A_side=_cluster_side(left),
-        bkp_B_chrom=right.chrom,
-        bkp_B_pos=right.peak_pos,
-        bkp_B_side=_cluster_side(right),
-        deleted_length=abs(right.peak_pos - left.peak_pos),
-        microhomology=mh_hit.sequence,
-        microhomology_length=mh_hit.length,
-        alt_clip_support=left.clip_count + right.clip_count,
-        alt_split_support=len({split.read_name for split in best_candidate.split_reads}),
-        alt_indel_support=best_candidate.indel_support,
-        treated_depth=max(left.treated_depth, right.treated_depth),
-        control_depth=max(left.control_depth, right.control_depth),
-        normal_noise=max(left.normal_noise, right.normal_noise),
-        notes=_mmej_notes(mh_hit, best_candidate.junction_evidence_types),
-        microhomology_left_end=mh_hit.left_end if mh_hit.found else "NA",
-        microhomology_right_start=mh_hit.right_start if mh_hit.found else "NA",
-        microhomology_offset_a=mh_hit.offset_a if mh_hit.found else "NA",
-        microhomology_offset_b=mh_hit.offset_b if mh_hit.found else "NA",
-        microhomology_deletion_start=mh_hit.deletion_start if mh_hit.found else "NA",
-        microhomology_deletion_end=mh_hit.deletion_end if mh_hit.found else "NA",
-        microhomology_deletion_length=mh_hit.deletion_length if mh_hit.found else "NA",
-        microhomology_ambiguity_bases=mh_hit.ambiguity_bases,
-        microhomology_equivalent_hits=mh_hit.equivalent_hit_count,
-        microhomology_low_complexity=mh_hit.low_complexity,
-        junction_evidence_support=len(best_candidate.junction_read_names),
-        junction_evidence_types=best_candidate.junction_evidence_types,
-        support_read_names=support_reads,
-    )
-    event.score = _event_score(event)
-    events.append(event)
-    for site in local_clips:
-        event_evidence.append(_clip_evidence(event.event_id, site))
-    for indel in best_candidate.deletion_indels:
-        event_evidence.append(_indel_evidence(event.event_id, indel))
-    for split in best_candidate.split_reads:
-        event_evidence.append(_split_evidence(event.event_id, split))
-    used.add((left.chrom, left.peak_pos, left.clip_side))
-    used.add((right.chrom, right.peak_pos, right.clip_side))
     return events, event_evidence, used
 
 
