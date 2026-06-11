@@ -176,12 +176,26 @@ def classify_bnd_events(
             for pair in evidence.discordant_pairs
             if pair.chrom == cluster.chrom
             and _near(pair.pos, cluster.peak_pos, config.clip_cluster_window * 2)
+            and _is_remote_bnd_anchor(
+                cluster.chrom,
+                cluster.peak_pos,
+                pair.mate_chrom,
+                pair.mate_pos,
+                config,
+            )
         ]
         linked_splits = [
             split
             for split in evidence.split_reads
             if split.chrom == cluster.chrom
             and _near(split.pos, cluster.peak_pos, config.clip_cluster_window * 3)
+            and _is_remote_bnd_anchor(
+                cluster.chrom,
+                cluster.peak_pos,
+                split.remote_chrom,
+                split.remote_pos,
+                config,
+            )
         ]
         # Remote support is grouped into coarse bins. This avoids splitting a
         # real remote locus into many tiny calls due to mate-position jitter.
@@ -277,6 +291,18 @@ def classify_bnd_events(
             for split in splits:
                 event_evidence.append(_split_evidence(temp_event_id, split))
     return events, event_evidence
+
+
+def _is_remote_bnd_anchor(
+    local_chrom: str,
+    local_pos: int,
+    remote_chrom: str,
+    remote_pos: int,
+    config: ScannerConfig,
+) -> bool:
+    if remote_chrom != local_chrom:
+        return True
+    return abs(remote_pos - local_pos) > config.max_local_event_distance
 
 
 def _classify_mmej_del(

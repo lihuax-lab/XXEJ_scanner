@@ -296,13 +296,18 @@ def is_discordant_pair(
         elif orientation in {"ff", "rr"} and not same_strand:
             reasons.append("opposite_strand_pair")
 
+    mate_outside_candidate_region = False
     if region is not None and chrom == mate_chrom:
         # A same-chromosome mate can still support wrong-end joining if it lands
-        # outside the enriched local search interval plus a small merge buffer.
+        # outside the enriched local search interval plus a small merge buffer,
+        # but that alone should not turn an otherwise proper pair into
+        # discordant evidence.
         padded_start = region.start - config.merge_distance
         padded_end = region.end + config.merge_distance
-        if mate_pos < padded_start or mate_pos > padded_end:
-            reasons.append("mate_outside_candidate_region")
+        mate_outside_candidate_region = mate_pos < padded_start or mate_pos > padded_end
+
+    if mate_outside_candidate_region and reasons:
+        reasons.append("mate_outside_candidate_region")
 
     return bool(reasons), ",".join(reasons)
 
@@ -462,9 +467,7 @@ def _count_read_name_depth(
     read_names: set[str] = set()
 
     with pysam.AlignmentFile(bam_path, "rb") as bam:
-        for read in iter_bam_records(
-            bam, chrom, start, end, config, min_mapq=min_mapq
-        ):
+        for read in iter_bam_records(bam, chrom, start, end, config, min_mapq=min_mapq):
             if get_reference_end(read) <= start or int(read.reference_start) >= end:
                 continue
 

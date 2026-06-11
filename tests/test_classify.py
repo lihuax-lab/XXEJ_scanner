@@ -6,7 +6,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from XXEJ_scanner.classify import _classify_mmej_del, assign_final_event_ids
+from XXEJ_scanner.classify import (
+    _classify_mmej_del,
+    assign_final_event_ids,
+    classify_bnd_events,
+)
 from XXEJ_scanner.models import (
     BreakpointCluster,
     CandidateRegion,
@@ -330,6 +334,46 @@ class ClassifyMmejDeletionTest(unittest.TestCase):
             event.junction_evidence_types,
             {"soft_clip_remap", "split_read_sa"},
         )
+        self.assertIn("split_read_sa", {row.evidence_type for row in event_evidence})
+
+
+class ClassifyBndEventsTest(unittest.TestCase):
+    def test_nearby_same_chromosome_split_is_not_bnd(self) -> None:
+        local_cluster = cluster(100, "left_clip")
+        evidence = RegionEvidence(
+            region=region(),
+            clip_sites=[clip_site(100, "left_clip", "clip1")],
+            split_reads=[split_read(100, 120, "split1")],
+        )
+
+        events, event_evidence = classify_bnd_events(
+            region(),
+            [local_cluster],
+            evidence,
+            scanner_config(min_bnd_support=1, max_local_event_distance=1000),
+        )
+
+        self.assertEqual(events, [])
+        self.assertEqual(event_evidence, [])
+
+    def test_distant_same_chromosome_split_is_bnd_intra(self) -> None:
+        local_cluster = cluster(100, "left_clip")
+        evidence = RegionEvidence(
+            region=region(),
+            clip_sites=[clip_site(100, "left_clip", "clip1")],
+            split_reads=[split_read(100, 2000, "split1")],
+        )
+
+        events, event_evidence = classify_bnd_events(
+            region(),
+            [local_cluster],
+            evidence,
+            scanner_config(min_bnd_support=1, max_local_event_distance=1000),
+        )
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].event_type, "NHEJ_BND_INS_INTRA")
+        self.assertEqual(events[0].bkp_B_pos, 2000)
         self.assertIn("split_read_sa", {row.evidence_type for row in event_evidence})
 
 

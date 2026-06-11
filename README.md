@@ -29,6 +29,27 @@ The lowercase alias is also available:
 uv run --no-editable xxej-scanner scan --help
 ```
 
+## Python API
+
+The package exposes a small public API from the package root:
+
+```python
+from XXEJ_scanner import ScannerConfig, run_scan
+
+config = ScannerConfig(
+    treated_bam="sample.sorted.bam",
+    reference_fasta="genome.fa",
+    output_dir="results/XXEJ_scanner",
+    peak_bed="peaks/union.narrow.bed",
+)
+summary = run_scan(config)
+```
+
+Common programmatic entry points include `parse_bed_regions`,
+`call_candidate_regions`, `collect_region_evidence`, `cluster_clip_sites`,
+`cluster_evidence_graph`, `classify_local_events`, `classify_bnd_events`, and
+the TSV writer helpers such as `write_events_tsv`.
+
 ## Inputs
 
 Required:
@@ -48,6 +69,7 @@ Optional:
 --sample-name treated
 --control-name control
 --depth-count-method pileup
+--cluster-method window
 --microhomology-search-window 5
 --include-supplementary
 --min-nhej-ins-indel-support 1
@@ -67,6 +89,7 @@ uv run --no-editable XXEJ_scanner scan \
   --min-mapq 20 \
   --min-clip-length 10 \
   --clip-cluster-window 20 \
+  --cluster-method window \
   --coverage-bin-size 100 \
   --merge-distance 300 \
   --depth-count-method pileup \
@@ -105,6 +128,8 @@ Coordinates are 0-based half-open for BED-like intervals. Breakpoint positions a
 For `MMEJ_DEL`, the original `start`, `end`, and `deleted_length` columns keep the nominal paired-cluster interval. Additional `microhomology_*` columns report the breakpoint-adjusted microhomology placement, the implied deletion span when one microhomology copy is collapsed, equivalent-placement count, and low-complexity status. `junction_evidence_support` and `junction_evidence_types` summarize read-level evidence that is consistent with the local deletion junction, such as matched CIGAR deletions, same-chromosome SA-tag split reads, or soft clips that match the opposite flank.
 
 Depth columns in `breakpoint_clusters.tsv` and `events.tsv` report local depth around the clustered breakpoint window, not depth across the full candidate region. With `--depth-count-method pileup`, the scanner reports mean base-level pileup depth across that local window. With `--depth-count-method region`, it reports the number of unique read names overlapping the local window, which is similar to the original molecule/read support count.
+
+Breakpoint clustering defaults to `--cluster-method window`, which groups soft-clipped read ends by genomic proximity only. The experimental `--cluster-method evidence-graph` mode builds a lightweight weighted graph over nearby clipped observations and uses deterministic community detection to link clips that are supported by local CIGAR indel, SA split-read, or discordant-pair evidence. It still emits the same `breakpoint_clusters.tsv` schema, so runs can be compared directly against the default window method.
 
 By default, discovery filters use mapped, primary, non-secondary alignments that pass MAPQ and aligned-length thresholds. Duplicate reads are excluded unless `--allow-duplicates` is set. Supplementary alignments are excluded unless `--include-supplementary` is set; SA tags on primary alignments are still parsed for split-read evidence.
 
