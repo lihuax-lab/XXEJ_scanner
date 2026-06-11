@@ -29,6 +29,27 @@ The lowercase alias is also available:
 uv run --no-editable xxej-scanner scan --help
 ```
 
+## Python API
+
+The package exposes a small public API from the package root:
+
+```python
+from XXEJ_scanner import ScannerConfig, run_scan
+
+config = ScannerConfig(
+    treated_bam="sample.sorted.bam",
+    reference_fasta="genome.fa",
+    output_dir="results/XXEJ_scanner",
+    peak_bed="peaks/union.narrow.bed",
+)
+summary = run_scan(config)
+```
+
+Common programmatic entry points include `parse_bed_regions`,
+`call_candidate_regions`, `collect_region_evidence`, `cluster_clip_sites`,
+`cluster_evidence_graph`, `classify_local_events`, `classify_bnd_events`, and
+the TSV writer helpers such as `write_events_tsv`.
+
 ## Inputs
 
 Required:
