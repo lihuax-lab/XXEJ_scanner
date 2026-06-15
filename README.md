@@ -107,6 +107,44 @@ uv run --no-editable XXEJ_scanner scan \
   --output-dir results/XXEJ_scanner
 ```
 
+## Synthetic BAM Benchmark
+
+For a first-pass correctness check, the `scripts/` directory contains a small
+BAM-level simulator. It does not simulate FASTQ or run an aligner. Instead, it
+writes a tiny reference, candidate BED, treated/control BAMs, and `truth.tsv`
+with clean synthetic evidence for one `NHEJ_INS`, one `MMEJ_DEL`, and one
+`NHEJ_BND_INS_INTER` event.
+
+Generate the benchmark:
+
+```bash
+uv run python scripts/simulate_xxej_benchmark.py --force
+```
+
+Run the scanner and evaluator:
+
+```bash
+bash sim/xxej_benchmark_v1/run_scanner.sh
+```
+
+Or run the steps manually:
+
+```bash
+uv run --no-editable XXEJ_scanner scan \
+  --treated-bam sim/xxej_benchmark_v1/treated.sorted.bam \
+  --control-bam sim/xxej_benchmark_v1/control.sorted.bam \
+  --reference-fasta sim/xxej_benchmark_v1/ref.fa \
+  --candidate-bed sim/xxej_benchmark_v1/candidates.bed \
+  --output-dir sim/xxej_benchmark_v1/scanner_out \
+  --min-alt-support 3 \
+  --min-bnd-support 3 \
+  --depth-count-method region
+
+uv run python scripts/evaluate_xxej_benchmark.py \
+  --truth sim/xxej_benchmark_v1/truth.tsv \
+  --events sim/xxej_benchmark_v1/scanner_out/events.tsv
+```
+
 ## Outputs
 
 The output directory contains:

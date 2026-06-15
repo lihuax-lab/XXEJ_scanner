@@ -419,10 +419,7 @@ def _classify_mmej_del(
             or _near(site.pos, right.peak_pos, config.clip_cluster_window)
         )
     ]
-    support_reads = {
-        site.read_name
-        for site in local_clips
-    }
+    support_reads = {site.read_name for site in local_clips}
     support_reads.update(indel.read_name for indel in best_candidate.deletion_indels)
     support_reads.update(split.read_name for split in best_candidate.split_reads)
     support_reads.update(site.read_name for site in best_candidate.remap_clips)
@@ -445,7 +442,9 @@ def _classify_mmej_del(
         microhomology=mh_hit.sequence,
         microhomology_length=mh_hit.length,
         alt_clip_support=left.clip_count + right.clip_count,
-        alt_split_support=len({split.read_name for split in best_candidate.split_reads}),
+        alt_split_support=len(
+            {split.read_name for split in best_candidate.split_reads}
+        ),
         alt_indel_support=best_candidate.indel_support,
         treated_depth=max(left.treated_depth, right.treated_depth),
         control_depth=max(left.control_depth, right.control_depth),
@@ -559,7 +558,9 @@ def _mmej_notes(hit: MicrohomologyHit, junction_evidence_types: set[str]) -> str
     if hit.found:
         notes.append("Reference microhomology context detected.")
     else:
-        notes.append("No reference microhomology detected near the nominal breakpoints.")
+        notes.append(
+            "No reference microhomology detected near the nominal breakpoints."
+        )
     if junction_evidence_types:
         evidence = ",".join(sorted(junction_evidence_types))
         notes.append(f"Junction-level evidence types: {evidence}.")
