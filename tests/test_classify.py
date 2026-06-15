@@ -10,12 +10,14 @@ from XXEJ_scanner.classify import (
     _classify_mmej_del,
     assign_final_event_ids,
     classify_bnd_events,
+    classify_local_events,
 )
 from XXEJ_scanner.models import (
     BreakpointCluster,
     CandidateRegion,
     CigarIndel,
     ClipSite,
+    DiscordantPair,
     EventEvidence,
     RegionEvidence,
     RepairEvent,
@@ -127,6 +129,24 @@ def split_read(pos: int, remote_pos: int, read_name: str) -> SplitReadEvidence:
         mapq=60,
         cigar="10M",
         sa_tag="chr1,1,+,10M,60,0;",
+    )
+
+
+def discordant_pair(
+    pos: int, remote_chrom: str, remote_pos: int, read_name: str
+) -> DiscordantPair:
+    return DiscordantPair(
+        read_name=read_name,
+        chrom="chr1",
+        pos=pos,
+        mate_chrom=remote_chrom,
+        mate_pos=remote_pos,
+        orientation="+-",
+        mapq=60,
+        is_reverse=False,
+        mate_is_reverse=True,
+        cigar="100M",
+        reason="different_chrom",
     )
 
 
@@ -335,6 +355,34 @@ class ClassifyMmejDeletionTest(unittest.TestCase):
             {"soft_clip_remap", "split_read_sa"},
         )
         self.assertIn("split_read_sa", {row.evidence_type for row in event_evidence})
+
+    def test_mmej_used_cluster_can_still_emit_remote_bnd(self) -> None:
+        left = cluster(50, "right_clip")
+        right = cluster(80, "left_clip")
+        evidence = RegionEvidence(
+            region=region(),
+            clip_sites=[
+                clip_site(50, "right_clip", "left_read"),
+                clip_site(80, "left_clip", "right_read"),
+            ],
+            discordant_pairs=[discordant_pair(50, "chr2", 500, "pair1")],
+        )
+
+        events, event_evidence = classify_local_events(
+            region(),
+            [left, right],
+            evidence,
+            FakeReference(sequence_with_matches({})),
+            scanner_config(min_bnd_support=1),
+        )
+
+        event_types = [event.event_type for event in events]
+        self.assertEqual(event_types, ["MMEJ_DEL", "NHEJ_BND_INS_INTER"])
+        self.assertEqual(events[1].bkp_A_pos, 50)
+        self.assertEqual(events[1].remote_chrom, "chr2")
+        self.assertIn(
+            "discordant_pair", {row.evidence_type for row in event_evidence}
+        )
 
 
 class ClassifyBndEventsTest(unittest.TestCase):

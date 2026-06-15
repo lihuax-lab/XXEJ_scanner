@@ -95,9 +95,9 @@ def classify_local_events(
     reference: ReferenceGenome,
     config: ScannerConfig,
 ) -> tuple[list[RepairEvent], list[EventEvidence]]:
-    # Priority order matters. A compatible two-breakpoint MMEJ deletion consumes
-    # its clusters first; remaining clusters are tested for remote BND evidence,
-    # then for local insertion/filler evidence.
+    # Priority order matters. A compatible two-breakpoint MMEJ deletion is
+    # reported first, but its clusters can still carry remote BND evidence.
+    # Only the local insertion fallback is suppressed for MMEJ-used clusters.
     events: list[RepairEvent] = []
     event_evidence: list[EventEvidence] = []
     sorted_clusters = sorted(clusters, key=lambda cluster: cluster.peak_pos)
@@ -110,14 +110,15 @@ def classify_local_events(
 
     for cluster in sorted_clusters:
         key = (cluster.chrom, cluster.peak_pos, cluster.clip_side)
-        if key in used_cluster_keys:
-            continue
+        cluster_used_by_mmej = key in used_cluster_keys
         bnd_events, bnd_evidence = classify_bnd_events(
             region, [cluster], evidence, config
         )
         if bnd_events:
             events.extend(bnd_events)
             event_evidence.extend(bnd_evidence)
+            continue
+        if cluster_used_by_mmej:
             continue
 
         insertion_event, insertion_evidence = _classify_nhej_ins(
