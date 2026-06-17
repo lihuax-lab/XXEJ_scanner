@@ -111,9 +111,9 @@ uv run --no-editable XXEJ_scanner scan \
 
 For a first-pass correctness check, the `scripts/` directory contains a small
 BAM-level simulator. It does not simulate FASTQ or run an aligner. Instead, it
-writes a tiny reference, candidate BED, treated/control BAMs, and `truth.tsv`
-with clean synthetic evidence for one `NHEJ_INS`, one `MMEJ_DEL`, and one
-`NHEJ_BND_INS_INTER` event.
+writes a synthetic reference, candidate BED, treated/control BAMs, and
+`truth.tsv` with 20 clean synthetic XXEJ events: seven `NHEJ_INS`, seven
+`MMEJ_DEL`, and six `NHEJ_BND_INS_INTER` events.
 
 Generate the benchmark:
 

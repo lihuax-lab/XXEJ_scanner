@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create a tiny BAM-level benchmark for XXEJ_scanner.
+"""Create a BAM-level benchmark for XXEJ_scanner.
 
 The benchmark intentionally skips FASTQ simulation and alignment. It writes
 coordinate-sorted BAM records with the minimum evidence classes consumed by the
@@ -21,6 +21,7 @@ CIGAR_MATCH = 0
 CIGAR_INS = 1
 CIGAR_DEL = 2
 CIGAR_SOFT_CLIP = 4
+MMEJ_MICROHOMOLOGY = "AGCTA"
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,7 +44,7 @@ class TruthEvent:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generate a small synthetic BAM benchmark for XXEJ_scanner."
+        description="Generate a 20-event synthetic BAM benchmark for XXEJ_scanner."
     )
     parser.add_argument(
         "--output-dir",
@@ -127,15 +128,10 @@ def main() -> int:
             )
         )
 
-    treated_records.extend(
-        _nhej_ins_records(seqs, alignment_header, tid_by_chrom, args.support)
-    )
-    treated_records.extend(
-        _mmej_del_records(seqs, alignment_header, tid_by_chrom, args.support)
-    )
-    treated_records.extend(
-        _bnd_inter_records(seqs, alignment_header, tid_by_chrom, args.support)
-    )
+    for event in events:
+        treated_records.extend(
+            _event_records(seqs, alignment_header, tid_by_chrom, event, args.support)
+        )
 
     _write_sorted_bam(
         output_dir / "treated.sorted.bam",
@@ -192,66 +188,110 @@ def _build_reference(rng: random.Random) -> dict[str, str]:
         "chrSim1": list(_random_dna(rng, 220_000)),
         "chrSim2": list(_random_dna(rng, 80_000)),
     }
-    # Make the MMEJ example carry an obvious 5 bp reference microhomology.
-    microhomology = "AGCTA"
-    mmej_a = 90_000
-    mmej_b = 90_240
-    seqs["chrSim1"][mmej_a - len(microhomology) : mmej_a] = microhomology
-    seqs["chrSim1"][mmej_b : mmej_b + len(microhomology)] = microhomology
+    # Make every MMEJ example carry an obvious 5 bp reference microhomology.
+    for event in _truth_events(support=1):
+        if event.event_type != "MMEJ_DEL":
+            continue
+        left_bkp = event.bkp_A_pos
+        right_bkp = int(event.bkp_B_pos)
+        seqs[event.chrom][
+            left_bkp - len(MMEJ_MICROHOMOLOGY) : left_bkp
+        ] = MMEJ_MICROHOMOLOGY
+        seqs[event.chrom][
+            right_bkp : right_bkp + len(MMEJ_MICROHOMOLOGY)
+        ] = MMEJ_MICROHOMOLOGY
     return {chrom: "".join(seq) for chrom, seq in seqs.items()}
 
 
 def _truth_events(support: int) -> list[TruthEvent]:
-    return [
-        TruthEvent(
-            truth_id="SIM_NHEJ_INS_001",
-            event_type="NHEJ_INS",
-            chrom="chrSim1",
-            bkp_A_pos=40_000,
-            bkp_B_chrom="NA",
-            bkp_B_pos="NA",
-            remote_chrom="NA",
-            remote_pos="NA",
-            inserted_sequence="GATTACA",
-            inserted_length="7",
-            deleted_length="NA",
-            support_reads=support * 2,
-            candidate_start=39_700,
-            candidate_end=40_300,
-        ),
-        TruthEvent(
-            truth_id="SIM_MMEJ_DEL_001",
-            event_type="MMEJ_DEL",
-            chrom="chrSim1",
-            bkp_A_pos=90_000,
-            bkp_B_chrom="chrSim1",
-            bkp_B_pos="90240",
-            remote_chrom="NA",
-            remote_pos="NA",
-            inserted_sequence="NA",
-            inserted_length="NA",
-            deleted_length="240",
-            support_reads=support * 3,
-            candidate_start=89_700,
-            candidate_end=90_540,
-        ),
-        TruthEvent(
-            truth_id="SIM_BND_INTER_001",
-            event_type="NHEJ_BND_INS_INTER",
-            chrom="chrSim1",
-            bkp_A_pos=150_000,
-            bkp_B_chrom="chrSim2",
-            bkp_B_pos="30000",
-            remote_chrom="chrSim2",
-            remote_pos="30000",
-            inserted_sequence="NA",
-            inserted_length="NA",
-            deleted_length="NA",
-            support_reads=support,
-            candidate_start=149_700,
-            candidate_end=150_300,
-        ),
+    nhej_specs = [
+        (24_000, "GATTACA"),
+        (50_000, "TACGGA"),
+        (75_000, "CCGTTA"),
+        (125_000, "ATGCCAA"),
+        (150_000, "TTAGGC"),
+        (175_000, "CGATAC"),
+        (205_000, "GGAATTC"),
     ]
+    mmej_specs = [
+        (35_000, 35_240),
+        (65_000, 65_210),
+        (95_000, 95_275),
+        (115_000, 115_180),
+        (145_000, 145_260),
+        (185_000, 185_220),
+        (210_000, 210_240),
+    ]
+    bnd_specs = [
+        (15_000, "chrSim2", 10_000),
+        (85_000, "chrSim2", 20_000),
+        (135_000, "chrSim2", 30_000),
+        (165_000, "chrSim2", 40_000),
+        (195_000, "chrSim2", 50_000),
+        (215_000, "chrSim2", 60_000),
+    ]
+
+    events: list[TruthEvent] = []
+    for idx, (breakpoint, inserted) in enumerate(nhej_specs, 1):
+        events.append(
+            TruthEvent(
+                truth_id=f"SIM_NHEJ_INS_{idx:03d}",
+                event_type="NHEJ_INS",
+                chrom="chrSim1",
+                bkp_A_pos=breakpoint,
+                bkp_B_chrom="NA",
+                bkp_B_pos="NA",
+                remote_chrom="NA",
+                remote_pos="NA",
+                inserted_sequence=inserted,
+                inserted_length=str(len(inserted)),
+                deleted_length="NA",
+                support_reads=support * 2,
+                candidate_start=breakpoint - 300,
+                candidate_end=breakpoint + 300,
+            )
+        )
+    for idx, (left_bkp, right_bkp) in enumerate(mmej_specs, 1):
+        events.append(
+            TruthEvent(
+                truth_id=f"SIM_MMEJ_DEL_{idx:03d}",
+                event_type="MMEJ_DEL",
+                chrom="chrSim1",
+                bkp_A_pos=left_bkp,
+                bkp_B_chrom="chrSim1",
+                bkp_B_pos=str(right_bkp),
+                remote_chrom="NA",
+                remote_pos="NA",
+                inserted_sequence="NA",
+                inserted_length="NA",
+                deleted_length=str(right_bkp - left_bkp),
+                support_reads=support * 3,
+                candidate_start=left_bkp - 300,
+                candidate_end=right_bkp + 300,
+            )
+        )
+    for idx, (breakpoint, remote_chrom, remote_pos) in enumerate(bnd_specs, 1):
+        events.append(
+            TruthEvent(
+                truth_id=f"SIM_BND_INTER_{idx:03d}",
+                event_type="NHEJ_BND_INS_INTER",
+                chrom="chrSim1",
+                bkp_A_pos=breakpoint,
+                bkp_B_chrom=remote_chrom,
+                bkp_B_pos=str(remote_pos),
+                remote_chrom=remote_chrom,
+                remote_pos=str(remote_pos),
+                inserted_sequence="NA",
+                inserted_length="NA",
+                deleted_length="NA",
+                support_reads=support,
+                candidate_start=breakpoint - 300,
+                candidate_end=breakpoint + 300,
+            )
+        )
+    if len(events) != 20:
+        raise AssertionError(f"Expected 20 benchmark events, found {len(events)}")
+    return events
 
 
 def _write_reference(path: Path, seqs: dict[str, str]) -> None:
@@ -345,15 +385,33 @@ def _background_reads(
     return records
 
 
+def _event_records(
+    seqs: dict[str, str],
+    header: pysam.AlignmentHeader,
+    tid_by_chrom: dict[str, int],
+    event: TruthEvent,
+    support: int,
+) -> list[pysam.AlignedSegment]:
+    if event.event_type == "NHEJ_INS":
+        return _nhej_ins_records(seqs, header, tid_by_chrom, event, support)
+    if event.event_type == "MMEJ_DEL":
+        return _mmej_del_records(seqs, header, tid_by_chrom, event, support)
+    if event.event_type == "NHEJ_BND_INS_INTER":
+        return _bnd_inter_records(seqs, header, tid_by_chrom, event, support)
+    raise ValueError(f"Unsupported benchmark event type: {event.event_type}")
+
+
 def _nhej_ins_records(
     seqs: dict[str, str],
     header: pysam.AlignmentHeader,
     tid_by_chrom: dict[str, int],
+    event: TruthEvent,
     support: int,
 ) -> list[pysam.AlignedSegment]:
-    chrom = "chrSim1"
-    breakpoint = 40_000
-    inserted = "GATTACA"
+    chrom = event.chrom
+    breakpoint = event.bkp_A_pos
+    inserted = event.inserted_sequence
+    prefix = event.truth_id.lower()
     records: list[pysam.AlignedSegment] = []
 
     for idx in range(support):
@@ -365,7 +423,7 @@ def _nhej_ins_records(
             _segment(
                 header,
                 tid_by_chrom,
-                query_name=f"sim_nhej_clip_{idx:03d}",
+                query_name=f"{prefix}_clip_{idx:03d}",
                 chrom=chrom,
                 start=breakpoint,
                 cigar=[(CIGAR_SOFT_CLIP, clip_len), (CIGAR_MATCH, aligned)],
@@ -386,7 +444,7 @@ def _nhej_ins_records(
             _segment(
                 header,
                 tid_by_chrom,
-                query_name=f"sim_nhej_ins_{idx:03d}",
+                query_name=f"{prefix}_ins_{idx:03d}",
                 chrom=chrom,
                 start=start,
                 cigar=[
@@ -404,12 +462,14 @@ def _mmej_del_records(
     seqs: dict[str, str],
     header: pysam.AlignmentHeader,
     tid_by_chrom: dict[str, int],
+    event: TruthEvent,
     support: int,
 ) -> list[pysam.AlignedSegment]:
-    chrom = "chrSim1"
-    left_bkp = 90_000
-    right_bkp = 90_240
+    chrom = event.chrom
+    left_bkp = event.bkp_A_pos
+    right_bkp = int(event.bkp_B_pos)
     deletion_length = right_bkp - left_bkp
+    prefix = event.truth_id.lower()
     records: list[pysam.AlignedSegment] = []
 
     for idx in range(support):
@@ -423,7 +483,7 @@ def _mmej_del_records(
             _segment(
                 header,
                 tid_by_chrom,
-                query_name=f"sim_mmej_leftclip_{idx:03d}",
+                query_name=f"{prefix}_leftclip_{idx:03d}",
                 chrom=chrom,
                 start=start,
                 cigar=[(CIGAR_MATCH, aligned), (CIGAR_SOFT_CLIP, clip_len)],
@@ -441,7 +501,7 @@ def _mmej_del_records(
             _segment(
                 header,
                 tid_by_chrom,
-                query_name=f"sim_mmej_rightclip_{idx:03d}",
+                query_name=f"{prefix}_rightclip_{idx:03d}",
                 chrom=chrom,
                 start=right_bkp,
                 cigar=[(CIGAR_SOFT_CLIP, clip_len), (CIGAR_MATCH, aligned)],
@@ -457,7 +517,7 @@ def _mmej_del_records(
             _segment(
                 header,
                 tid_by_chrom,
-                query_name=f"sim_mmej_del_{idx:03d}",
+                query_name=f"{prefix}_del_{idx:03d}",
                 chrom=chrom,
                 start=start,
                 cigar=[
@@ -475,12 +535,14 @@ def _bnd_inter_records(
     seqs: dict[str, str],
     header: pysam.AlignmentHeader,
     tid_by_chrom: dict[str, int],
+    event: TruthEvent,
     support: int,
 ) -> list[pysam.AlignedSegment]:
-    chrom = "chrSim1"
-    breakpoint = 150_000
-    remote_chrom = "chrSim2"
-    remote_pos = 30_000
+    chrom = event.chrom
+    breakpoint = event.bkp_A_pos
+    remote_chrom = event.remote_chrom
+    remote_pos = int(event.remote_pos)
+    prefix = event.truth_id.lower()
     records: list[pysam.AlignedSegment] = []
 
     for idx in range(support):
@@ -493,7 +555,7 @@ def _bnd_inter_records(
         record = _segment(
             header,
             tid_by_chrom,
-            query_name=f"sim_bnd_inter_{idx:03d}",
+            query_name=f"{prefix}_{idx:03d}",
             chrom=chrom,
             start=breakpoint,
             cigar=[(CIGAR_SOFT_CLIP, clip_len), (CIGAR_MATCH, aligned)],
