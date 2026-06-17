@@ -24,6 +24,7 @@ from XXEJ_scanner.models import (
     ScannerConfig,
     SplitReadEvidence,
 )
+from XXEJ_scanner.validation import assign_event_filter
 
 
 class FakeReference:
@@ -386,6 +387,78 @@ class ClassifyMmejDeletionTest(unittest.TestCase):
 
 
 class ClassifyBndEventsTest(unittest.TestCase):
+    def test_pair_only_discordant_pair_emits_bnd_without_cluster(self) -> None:
+        config = scanner_config(min_alt_support=3, min_bnd_support=3)
+        evidence = RegionEvidence(
+            region=region(),
+            discordant_pairs=[discordant_pair(50, "chr2", 500, "pair1")],
+        )
+
+        events, event_evidence = classify_local_events(
+            region(),
+            [],
+            evidence,
+            FakeReference(sequence_with_matches({})),
+            config,
+        )
+
+        self.assertEqual(len(events), 1)
+        event = events[0]
+        self.assertEqual(event.event_type, "NHEJ_BND_INS_INTER")
+        self.assertEqual(event.bkp_A_pos, 50)
+        self.assertEqual(event.bkp_A_side, "pair_only")
+        self.assertEqual(event.remote_chrom, "chr2")
+        self.assertEqual(event.alt_clip_support, 0)
+        self.assertEqual(event.alt_discordant_pair_support, 1)
+        self.assertEqual(assign_event_filter(event, config), "PairOnlyBnd")
+        self.assertIn(
+            "discordant_pair", {row.evidence_type for row in event_evidence}
+        )
+
+    def test_discordant_pair_does_not_need_to_be_near_peak(self) -> None:
+        local_cluster = cluster(100, "left_clip")
+        evidence = RegionEvidence(
+            region=region(),
+            clip_sites=[clip_site(100, "left_clip", "clip1")],
+            discordant_pairs=[discordant_pair(20, "chr2", 500, "pair1")],
+        )
+
+        events, event_evidence = classify_bnd_events(
+            region(),
+            [local_cluster],
+            evidence,
+            scanner_config(min_bnd_support=1),
+        )
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].event_type, "NHEJ_BND_INS_INTER")
+        self.assertEqual(events[0].bkp_A_pos, 100)
+        self.assertIn(
+            "discordant_pair", {row.evidence_type for row in event_evidence}
+        )
+
+    def test_discordant_pair_is_assigned_to_nearest_cluster_once(self) -> None:
+        left_cluster = cluster(100, "left_clip")
+        right_cluster = cluster(160, "right_clip")
+        evidence = RegionEvidence(
+            region=region(),
+            clip_sites=[
+                clip_site(100, "left_clip", "clip1"),
+                clip_site(160, "right_clip", "clip2"),
+            ],
+            discordant_pairs=[discordant_pair(150, "chr2", 500, "pair1")],
+        )
+
+        events, _event_evidence = classify_bnd_events(
+            region(),
+            [left_cluster, right_cluster],
+            evidence,
+            scanner_config(min_bnd_support=1),
+        )
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].bkp_A_pos, 160)
+
     def test_nearby_same_chromosome_split_is_not_bnd(self) -> None:
         local_cluster = cluster(100, "left_clip")
         evidence = RegionEvidence(

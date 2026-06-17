@@ -30,6 +30,10 @@ def _cluster_side(cluster: BreakpointCluster) -> str:
     return cluster.clip_side
 
 
+def _cluster_key(cluster: BreakpointCluster) -> tuple[str, int, str]:
+    return (cluster.chrom, cluster.peak_pos, cluster.clip_side)
+
+
 @dataclass(slots=True)
 class _MmejPairCandidate:
     left: BreakpointCluster
@@ -108,15 +112,32 @@ def classify_local_events(
     events.extend(mmej_events)
     event_evidence.extend(mmej_evidence)
 
+    bnd_events, bnd_evidence = classify_bnd_events(
+        region, sorted_clusters, evidence, config
+    )
+    bnd_events_by_cluster: dict[tuple[str, int, str], list[RepairEvent]] = (
+        defaultdict(list)
+    )
+    bnd_evidence_by_event: dict[str, list[EventEvidence]] = defaultdict(list)
+    pair_only_bnd_events: list[RepairEvent] = []
+    for event in bnd_events:
+        if event.bkp_A_side == "pair_only":
+            pair_only_bnd_events.append(event)
+            continue
+        bnd_events_by_cluster[
+            (event.bkp_A_chrom, int(event.bkp_A_pos), event.bkp_A_side)
+        ].append(event)
+    for row in bnd_evidence:
+        bnd_evidence_by_event[row.event_id].append(row)
+
     for cluster in sorted_clusters:
-        key = (cluster.chrom, cluster.peak_pos, cluster.clip_side)
+        key = _cluster_key(cluster)
         cluster_used_by_mmej = key in used_cluster_keys
-        bnd_events, bnd_evidence = classify_bnd_events(
-            region, [cluster], evidence, config
-        )
-        if bnd_events:
-            events.extend(bnd_events)
-            event_evidence.extend(bnd_evidence)
+        cluster_bnd_events = bnd_events_by_cluster.get(key, [])
+        if cluster_bnd_events:
+            events.extend(cluster_bnd_events)
+            for event in cluster_bnd_events:
+                event_evidence.extend(bnd_evidence_by_event[event.event_id])
             continue
         if cluster_used_by_mmej:
             continue
@@ -127,6 +148,10 @@ def classify_local_events(
         if insertion_event:
             events.append(insertion_event)
             event_evidence.extend(insertion_evidence)
+
+    for event in pair_only_bnd_events:
+        events.append(event)
+        event_evidence.extend(bnd_evidence_by_event[event.event_id])
 
     return events, event_evidence
 
@@ -163,6 +188,36 @@ def assign_final_event_ids(
     return events, evidence
 
 
+def _nearest_remote_cluster_for_pair(
+    pair: DiscordantPair,
+    clusters: list[BreakpointCluster],
+    config: ScannerConfig,
+) -> BreakpointCluster | None:
+    candidates = [
+        cluster
+        for cluster in clusters
+        if pair.chrom == cluster.chrom
+        and _is_remote_bnd_anchor(
+            cluster.chrom,
+            cluster.peak_pos,
+            pair.mate_chrom,
+            pair.mate_pos,
+            config,
+        )
+    ]
+    if not candidates:
+        return None
+    return min(
+        candidates,
+        key=lambda cluster: (
+            abs(pair.pos - cluster.peak_pos),
+            -cluster.clip_count,
+            cluster.peak_pos,
+            cluster.clip_side,
+        ),
+    )
+
+
 def classify_bnd_events(
     region: CandidateRegion,
     clusters: list[BreakpointCluster],
@@ -171,20 +226,19 @@ def classify_bnd_events(
 ) -> tuple[list[RepairEvent], list[EventEvidence]]:
     events: list[RepairEvent] = []
     event_evidence: list[EventEvidence] = []
+    discordants_by_cluster: dict[tuple[str, int, str], list[DiscordantPair]] = (
+        defaultdict(list)
+    )
+    pair_only_discordants: list[DiscordantPair] = []
+    for pair in evidence.discordant_pairs:
+        cluster = _nearest_remote_cluster_for_pair(pair, clusters, config)
+        if cluster is None:
+            pair_only_discordants.append(pair)
+            continue
+        discordants_by_cluster[_cluster_key(cluster)].append(pair)
+
     for cluster in clusters:
-        linked_discordants = [
-            pair
-            for pair in evidence.discordant_pairs
-            if pair.chrom == cluster.chrom
-            and _near(pair.pos, cluster.peak_pos, config.clip_cluster_window * 2)
-            and _is_remote_bnd_anchor(
-                cluster.chrom,
-                cluster.peak_pos,
-                pair.mate_chrom,
-                pair.mate_pos,
-                config,
-            )
-        ]
+        linked_discordants = discordants_by_cluster[_cluster_key(cluster)]
         linked_splits = [
             split
             for split in evidence.split_reads
@@ -291,6 +345,94 @@ def classify_bnd_events(
                 event_evidence.append(_pair_evidence(temp_event_id, pair))
             for split in splits:
                 event_evidence.append(_split_evidence(temp_event_id, split))
+
+    pair_only_events, pair_only_evidence = _classify_pair_only_bnd_events(
+        region, pair_only_discordants, config
+    )
+    events.extend(pair_only_events)
+    event_evidence.extend(pair_only_evidence)
+    return events, event_evidence
+
+
+def _classify_pair_only_bnd_events(
+    region: CandidateRegion,
+    pairs: list[DiscordantPair],
+    config: ScannerConfig,
+) -> tuple[list[RepairEvent], list[EventEvidence]]:
+    events: list[RepairEvent] = []
+    event_evidence: list[EventEvidence] = []
+    grouped: dict[tuple[str, int, str, int], list[DiscordantPair]] = defaultdict(
+        list
+    )
+    bin_size = max(1, config.coverage_bin_size)
+    for pair in pairs:
+        if not _is_remote_bnd_anchor(
+            pair.chrom,
+            pair.pos,
+            pair.mate_chrom,
+            pair.mate_pos,
+            config,
+        ):
+            continue
+        local_bin = pair.pos - (pair.pos % bin_size)
+        remote_bin = pair.mate_pos - (pair.mate_pos % bin_size)
+        grouped[(pair.chrom, local_bin, pair.mate_chrom, remote_bin)].append(pair)
+
+    for (
+        local_chrom,
+        local_bin,
+        remote_chrom,
+        remote_bin,
+    ), group in grouped.items():
+        local_positions = [pair.pos for pair in group]
+        remote_positions = [pair.mate_pos for pair in group]
+        local_pos = int(round(sum(local_positions) / len(local_positions)))
+        remote_pos = int(round(sum(remote_positions) / len(remote_positions)))
+        orientation_values = [
+            pair.orientation for pair in group if pair.orientation != "NA"
+        ]
+        orientation = (
+            Counter(orientation_values).most_common(1)[0][0]
+            if orientation_values
+            else "NA"
+        )
+        event_type = (
+            "NHEJ_BND_INS_INTER"
+            if remote_chrom != local_chrom
+            else "NHEJ_BND_INS_INTRA"
+        )
+        temp_event_id = (
+            f"TMP_BND_PAIRONLY_{region.region_id}_{local_chrom}_{local_bin}_"
+            f"{remote_chrom}_{remote_bin}"
+        )
+        event = RepairEvent(
+            event_id=temp_event_id,
+            event_type=event_type,
+            chrom=local_chrom,
+            start=max(0, local_pos - 1),
+            end=local_pos + 1,
+            bkp_A_chrom=local_chrom,
+            bkp_A_pos=local_pos,
+            bkp_A_side="pair_only",
+            bkp_B_chrom=remote_chrom,
+            bkp_B_pos=remote_pos,
+            bkp_B_side="remote",
+            remote_chrom=remote_chrom,
+            remote_pos=remote_pos,
+            orientation=orientation,
+            alt_discordant_pair_support=len({pair.read_name for pair in group}),
+            treated_depth=region.treated_coverage,
+            control_depth=region.control_coverage,
+            notes=(
+                "Pair-only candidate wrong-end joining from discordant mate evidence."
+            ),
+            support_read_names={pair.read_name for pair in group},
+        )
+        event.score = _event_score(event)
+        events.append(event)
+        for pair in group:
+            event_evidence.append(_pair_evidence(temp_event_id, pair))
+
     return events, event_evidence
 
 
