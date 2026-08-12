@@ -203,6 +203,7 @@ def write_raw_split_reads_tsv(path: str, splits: Iterable[SplitReadEvidence]) ->
         "remote_strand",
         "remote_cigar",
         "remote_mapq",
+        "remote_nm",
         "orientation",
         "mapq",
         "cigar",

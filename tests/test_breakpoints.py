@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from XXEJ_scanner.breakpoints import cluster_evidence_graph
+from XXEJ_scanner.breakpoints import cluster_clip_sites, cluster_evidence_graph
 from XXEJ_scanner.models import (
     CandidateRegion,
     CigarIndel,
@@ -134,6 +134,30 @@ class EvidenceGraphClusteringTest(unittest.TestCase):
 
         self.assertEqual(len(clusters), 1)
         self.assertEqual(clusters[0].chrom, "chr1")
+
+
+class WindowClusteringTest(unittest.TestCase):
+    def test_same_molecule_counts_once_per_breakpoint(self) -> None:
+        sites = [
+            clip_site(10, "right_clip", "read1"),
+            clip_site(10, "right_clip", "read1"),
+            clip_site(10, "right_clip", "read2"),
+        ]
+
+        clusters = cluster_clip_sites(sites, scanner_config())
+
+        self.assertEqual(clusters[0].clip_count, 2)
+
+    def test_cluster_span_cannot_chain_beyond_window(self) -> None:
+        sites = [
+            clip_site(10, "right_clip", "read1"),
+            clip_site(15, "right_clip", "read2"),
+            clip_site(20, "right_clip", "read3"),
+        ]
+
+        clusters = cluster_clip_sites(sites, scanner_config(clip_cluster_window=5))
+
+        self.assertEqual([(c.cluster_start, c.cluster_end) for c in clusters], [(10, 16), (20, 21)])
 
 
 if __name__ == "__main__":

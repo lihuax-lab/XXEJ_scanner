@@ -92,6 +92,7 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--allow-duplicates", action="store_true")
     scan.add_argument("--include-supplementary", action="store_true")
     scan.add_argument("--min-aligned-length", type=int, default=20)
+    scan.add_argument("--max-sa-nm", type=int, default=10)
     scan.add_argument("--scan-padding", type=int, default=200)
     scan.add_argument("--max-local-event-distance", type=int, default=10000)
     scan.add_argument("--max-insertion-length", type=int, default=50)
@@ -140,6 +141,7 @@ def _config_from_args(args: argparse.Namespace) -> ScannerConfig:
         allow_duplicates=args.allow_duplicates,
         include_supplementary=args.include_supplementary,
         min_aligned_length=args.min_aligned_length,
+        max_sa_nm=args.max_sa_nm,
         scan_padding=args.scan_padding,
         max_local_event_distance=args.max_local_event_distance,
         max_insertion_length=args.max_insertion_length,

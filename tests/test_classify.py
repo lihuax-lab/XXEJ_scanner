@@ -126,6 +126,7 @@ def split_read(pos: int, remote_pos: int, read_name: str) -> SplitReadEvidence:
         remote_strand="+",
         remote_cigar="10M",
         remote_mapq=60,
+        remote_nm=0,
         orientation="++",
         mapq=60,
         cigar="10M",
@@ -457,6 +458,32 @@ class ClassifyBndEventsTest(unittest.TestCase):
         self.assertEqual(events[0].event_type, "BND_INTRA")
         self.assertEqual(events[0].bkp_B_pos, 2000)
         self.assertIn("split_read_sa", {row.evidence_type for row in event_evidence})
+
+    def test_split_anchor_absorbs_nearby_pair_across_bin_boundary(self) -> None:
+        local_cluster = cluster(100, "left_clip")
+        split = split_read(100, 1999, "split1")
+        pair = discordant_pair(100, "chr1", 2001, "pair1")
+        evidence = RegionEvidence(
+            region=region(),
+            split_reads=[split],
+            discordant_pairs=[pair],
+        )
+
+        events, _rows = classify_bnd_events(
+            region(),
+            [local_cluster],
+            evidence,
+            scanner_config(
+                min_bnd_support=1,
+                max_local_event_distance=1000,
+                coverage_bin_size=10,
+            ),
+        )
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].alt_split_support, 1)
+        self.assertEqual(events[0].alt_discordant_pair_support, 1)
+        self.assertEqual(events[0].remote_pos, 2000)
 
 
 if __name__ == "__main__":
