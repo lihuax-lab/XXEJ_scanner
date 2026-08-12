@@ -128,6 +128,8 @@ def write_events_tsv(path: str, events: Iterable[RepairEvent]) -> None:
         "microhomology_low_complexity",
         "junction_evidence_support",
         "junction_evidence_types",
+        "evidence_level",
+        "junction_resolved",
     ]
     _write_dataclass_tsv(path, fields, events)
 

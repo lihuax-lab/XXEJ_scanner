@@ -8,7 +8,7 @@ from .models import CandidateRegion, RepairEvent, ScannerConfig
 
 def is_pair_only_bnd(event: RepairEvent) -> bool:
     return (
-        event.event_type.startswith("NHEJ_BND")
+        event.event_type.startswith("BND_")
         and event.bkp_A_side == "pair_only"
         and event.alt_clip_support == 0
         and event.alt_discordant_pair_support > 0
@@ -20,22 +20,21 @@ def assign_event_filter(event: RepairEvent, config: ScannerConfig) -> str:
     # first matching label is reported to keep events.tsv easy to scan.
     if is_pair_only_bnd(event):
         return "PairOnlyBnd"
+    if event.evidence_level == "CLIP_ONLY":
+        return "ClipOnly"
     if event.alt_support < config.min_alt_support:
         return "LowSupport"
     if event.normal_noise > config.max_normal_clip_rate:
         return "HighControlNoise"
     if (
-        event.event_type == "NHEJ_INS"
+        event.event_type == "LOCAL_INS"
         and not config.allow_clip_only_nhej_ins
         and event.alt_indel_support < config.min_nhej_ins_indel_support
     ):
         return "NoInsertionEvidence"
-    if event.alt_clip_support < config.min_alt_support and event.event_type in {
-        "NHEJ_INS",
-        "MMEJ_DEL",
-    }:
-        return "WeakClipCluster"
-    if event.event_type.startswith("NHEJ_BND") and (
+    if event.event_type == "LOCAL_DEL" and not event.junction_resolved:
+        return "NoJunctionEvidence"
+    if event.event_type.startswith("BND_") and (
         event.alt_split_support + event.alt_discordant_pair_support
         < config.min_bnd_support
     ):
@@ -86,7 +85,7 @@ def second_pass_validate_event(
     } | {split.read_name for split in strict_evidence.split_reads}
 
     if (
-        event.event_type == "NHEJ_INS"
+        event.event_type == "LOCAL_INS"
         and not config.allow_clip_only_nhej_ins
         and len(strict_indel_support) < config.min_nhej_ins_indel_support
     ):
