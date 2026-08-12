@@ -27,6 +27,7 @@ from .utils import (
     cigar_to_string,
     clamp_start,
     pair_orientation,
+    parse_cigar_string,
     reference_consumed_length,
 )
 
@@ -336,8 +337,45 @@ def extract_discordant_pair_from_read(
     )
 
 
+def _alignment_geometry(
+    reference_start: int,
+    cigartuples: list[tuple[int, int]],
+    strand: str,
+) -> tuple[int, int, int, int]:
+    """Return query start/end and reference start/end for one alignment segment."""
+    left_clip, right_clip, _, _ = clip_lengths(cigartuples)
+    query_span = sum(
+        length
+        for op, length in cigartuples
+        if op in QUERY_CONSUMING_OPS or op == CIGAR_HARD_CLIP
+    )
+    if strand == "+":
+        query_start, query_end = left_clip, query_span - right_clip
+    else:
+        query_start, query_end = right_clip, query_span - left_clip
+    return (
+        query_start,
+        query_end,
+        reference_start,
+        reference_start + reference_consumed_length(cigartuples),
+    )
+
+
+def _breakpoint_for_query_edge(
+    geometry: tuple[int, int, int, int], strand: str, edge: str
+) -> tuple[int, str]:
+    _query_start, _query_end, reference_start, reference_end = geometry
+    uses_reference_start = (edge == "start") == (strand == "+")
+    if uses_reference_start:
+        return reference_start, "left_clip"
+    return reference_end, "right_clip"
+
+
 def extract_split_reads_from_sa_tag(
-    read: object, config: ScannerConfig
+    read: object,
+    config: ScannerConfig,
+    *,
+    min_mapq: int | None = None,
 ) -> list[SplitReadEvidence]:
     if not passes_read_filters(read, config):
         return []
@@ -347,20 +385,14 @@ def extract_split_reads_from_sa_tag(
     # rname,pos,strand,CIGAR,mapQ,NM;... with 1-based positions.
     sa_tag = get_tag(read, "SA")
     chrom = read_reference_name(read)
-    local_pos = int(getattr(read, "reference_start"))
     orientation_local = "-" if getattr(read, "is_reverse", False) else "+"
     cigar = cigar_to_string(getattr(read, "cigartuples", None))
+    local_geometry = _alignment_geometry(
+        int(getattr(read, "reference_start")),
+        list(getattr(read, "cigartuples", None) or []),
+        orientation_local,
+    )
     splits: list[SplitReadEvidence] = []
-
-    left_len, right_len, _, _ = clip_lengths(getattr(read, "cigartuples", None))
-    if left_len >= config.min_clip_length and right_len >= config.min_clip_length:
-        side = "both"
-    elif left_len >= config.min_clip_length:
-        side = "left_clip"
-    elif right_len >= config.min_clip_length:
-        side = "right_clip"
-    else:
-        side = "SA"
 
     for item in sa_tag.rstrip(";").split(";"):
         if not item:
@@ -368,16 +400,35 @@ def extract_split_reads_from_sa_tag(
         fields = item.split(",")
         if len(fields) < 6:
             continue
-        remote_chrom, remote_pos_1, remote_strand, remote_cigar, remote_mapq, _nm = (
+        remote_chrom, remote_pos_1, remote_strand, remote_cigar, remote_mapq, nm = (
             fields[:6]
         )
         try:
-            # Convert SAM's 1-based SA position to the 0-based convention used
-            # everywhere else in this package.
-            remote_pos = int(remote_pos_1) - 1
+            remote_start = int(remote_pos_1) - 1
             remote_mapq_int = int(remote_mapq)
+            remote_nm_int = int(nm)
+            remote_cigartuples = parse_cigar_string(remote_cigar)
         except ValueError:
             continue
+        threshold = config.min_mapq if min_mapq is None else min_mapq
+        if remote_mapq_int < threshold or remote_nm_int > config.max_sa_nm:
+            continue
+        remote_geometry = _alignment_geometry(
+            remote_start, remote_cigartuples, remote_strand
+        )
+        local_first = (
+            local_geometry[0] + local_geometry[1]
+            <= remote_geometry[0] + remote_geometry[1]
+        )
+        local_edge, remote_edge = (
+            ("end", "start") if local_first else ("start", "end")
+        )
+        local_pos, side = _breakpoint_for_query_edge(
+            local_geometry, orientation_local, local_edge
+        )
+        remote_pos, _remote_side = _breakpoint_for_query_edge(
+            remote_geometry, remote_strand, remote_edge
+        )
         splits.append(
             SplitReadEvidence(
                 read_name=str(getattr(read, "query_name", "")),
@@ -389,6 +440,7 @@ def extract_split_reads_from_sa_tag(
                 remote_strand=remote_strand,
                 remote_cigar=remote_cigar,
                 remote_mapq=remote_mapq_int,
+                remote_nm=remote_nm_int,
                 orientation=orientation_local + remote_strand,
                 mapq=int(getattr(read, "mapping_quality", 0)),
                 cigar=cigar,
@@ -430,7 +482,7 @@ def collect_region_evidence(
     # Avoid counting the same read name multiple times when both mates or
     # multiple SA records point to the same remote locus.
     seen_discordant: set[str] = set()
-    seen_split: set[tuple[str, str, int]] = set()
+    seen_split: set[tuple[object, ...]] = set()
     with pysam.AlignmentFile(bam_path, "rb") as bam:
         for read in iter_bam_records(
             bam,
@@ -446,8 +498,17 @@ def collect_region_evidence(
             if discordant and discordant.read_name not in seen_discordant:
                 evidence.discordant_pairs.append(discordant)
                 seen_discordant.add(discordant.read_name)
-            for split in extract_split_reads_from_sa_tag(read, config):
-                key = (split.read_name, split.remote_chrom, split.remote_pos)
+            for split in extract_split_reads_from_sa_tag(
+                read, config, min_mapq=min_mapq
+            ):
+                key = (
+                    split.read_name,
+                    split.chrom,
+                    split.pos,
+                    split.remote_chrom,
+                    split.remote_pos,
+                    split.orientation,
+                )
                 if key not in seen_split:
                     evidence.split_reads.append(split)
                     seen_split.add(key)

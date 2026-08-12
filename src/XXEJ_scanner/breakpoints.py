@@ -23,7 +23,15 @@ def cluster_clip_sites(
     # Cluster by genomic proximity only. Strand and side are summarized after
     # clustering because both sides can mark the same local DSB-prone position.
     site_list = sorted(
-        [site for site in sites if region is None or (site.chrom == region.chrom and region.start <= site.pos <= region.end)],
+        _unique_molecule_sites(
+            site
+            for site in sites
+            if region is None
+            or (
+                site.chrom == region.chrom
+                and region.start <= site.pos <= region.end
+            )
+        ),
         key=lambda site: (site.chrom, site.pos),
     )
     if not site_list:
@@ -32,8 +40,11 @@ def cluster_clip_sites(
     clusters: list[list[ClipSite]] = []
     current: list[ClipSite] = [site_list[0]]
     for site in site_list[1:]:
-        last = current[-1]
-        if site.chrom == last.chrom and site.pos <= last.pos + config.clip_cluster_window:
+        first = current[0]
+        if (
+            site.chrom == first.chrom
+            and site.pos <= first.pos + config.clip_cluster_window
+        ):
             current.append(site)
             continue
         clusters.append(current)
@@ -57,7 +68,7 @@ def cluster_evidence_graph(
     collapse both breakpoints into one cluster.
     """
     site_list = sorted(
-        [
+        _unique_molecule_sites(
             site
             for site in evidence.clip_sites
             if region is None
@@ -65,7 +76,7 @@ def cluster_evidence_graph(
                 site.chrom == region.chrom
                 and region.start <= site.pos <= region.end
             )
-        ],
+        ),
         key=lambda site: (site.chrom, site.pos, site.read_name, site.side),
     )
     if not site_list:
@@ -82,6 +93,19 @@ def cluster_evidence_graph(
         clusters,
         key=lambda cluster: (cluster.chrom, cluster.peak_pos, cluster.cluster_start),
     )
+
+
+def _unique_molecule_sites(sites: Iterable[ClipSite]) -> list[ClipSite]:
+    unique: dict[tuple[str, str, int, str], ClipSite] = {}
+    for site in sites:
+        key = (site.read_name, site.chrom, site.pos, site.side)
+        current = unique.get(key)
+        if current is None or (site.mapq, site.clip_length) > (
+            current.mapq,
+            current.clip_length,
+        ):
+            unique[key] = site
+    return list(unique.values())
 
 
 def _build_cluster(sites: list[ClipSite], region_id: str) -> BreakpointCluster:

@@ -47,6 +47,7 @@ class ScannerConfig:
     allow_duplicates: bool = False
     include_supplementary: bool = False
     min_aligned_length: int = 20
+    max_sa_nm: int = 10
     scan_padding: int = 200
     max_local_event_distance: int = 10000
     max_insertion_length: int = 50
@@ -133,6 +134,7 @@ class SplitReadEvidence:
     remote_strand: str
     remote_cigar: str
     remote_mapq: int
+    remote_nm: int
     orientation: str
     mapq: int
     cigar: str

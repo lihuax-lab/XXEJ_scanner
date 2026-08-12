@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from XXEJ_scanner.bam_evidence import (
     extract_discordant_pair_from_read,
+    extract_split_reads_from_sa_tag,
     is_discordant_pair,
 )
 from XXEJ_scanner.models import CandidateRegion, ScannerConfig
@@ -84,6 +85,52 @@ class DiscordantPairTests(unittest.TestCase):
         self.assertIsNotNone(pair)
         assert pair is not None
         self.assertEqual(pair.reason, "distant_mate,mate_outside_candidate_region")
+
+
+class SplitReadTests(unittest.TestCase):
+    def test_sa_breakpoints_use_query_order_and_cigar_ends(self):
+        read = make_read(
+            is_paired=False,
+            reference_start=100,
+            cigartuples=[(0, 50), (4, 50)],
+            has_tag=lambda tag: tag == "SA",
+            get_tag=lambda tag: "chr2,501,+,50S50M,60,2;",
+        )
+
+        splits = extract_split_reads_from_sa_tag(read, make_config())
+
+        self.assertEqual(len(splits), 1)
+        self.assertEqual((splits[0].pos, splits[0].side), (150, "right_clip"))
+        self.assertEqual(splits[0].remote_pos, 500)
+        self.assertEqual(splits[0].remote_nm, 2)
+
+    def test_reverse_sa_uses_reference_end_for_query_start(self):
+        read = make_read(
+            is_paired=False,
+            reference_start=100,
+            cigartuples=[(0, 50), (4, 50)],
+            has_tag=lambda tag: tag == "SA",
+            get_tag=lambda tag: "chr2,501,-,50M50S,60,1;",
+        )
+
+        split = extract_split_reads_from_sa_tag(read, make_config())[0]
+
+        self.assertEqual(split.pos, 150)
+        self.assertEqual(split.remote_pos, 550)
+
+    def test_sa_remote_quality_filters_are_enforced(self):
+        read = make_read(
+            is_paired=False,
+            cigartuples=[(0, 50), (4, 50)],
+            has_tag=lambda tag: tag == "SA",
+            get_tag=lambda tag: "chr2,501,+,50S50M,40,11;",
+        )
+
+        splits = extract_split_reads_from_sa_tag(
+            read, make_config(max_sa_nm=10), min_mapq=50
+        )
+
+        self.assertEqual(splits, [])
 
 
 if __name__ == "__main__":

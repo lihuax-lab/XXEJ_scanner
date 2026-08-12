@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections import Counter, defaultdict
+from statistics import median
 
 from .models import (
     BreakpointCluster,
@@ -203,41 +204,27 @@ def classify_bnd_events(
                 config,
             )
         ]
-        # Remote support is grouped into coarse bins. This avoids splitting a
-        # real remote locus into many tiny calls due to mate-position jitter.
-        grouped: dict[tuple[str, int], dict[str, list[object]]] = defaultdict(
-            lambda: {"pairs": [], "splits": []}
-        )
-        for pair in linked_discordants:
-            remote_bin = pair.mate_pos - (
-                pair.mate_pos % max(1, config.coverage_bin_size)
+        for group in _group_remote_evidence(
+            linked_discordants, linked_splits, config.coverage_bin_size
+        ):
+            pairs = [item for item in group if isinstance(item, DiscordantPair)]
+            splits = [item for item in group if isinstance(item, SplitReadEvidence)]
+            first = group[0]
+            remote_chrom = (
+                first.mate_chrom
+                if isinstance(first, DiscordantPair)
+                else first.remote_chrom
             )
-            grouped[(pair.mate_chrom, remote_bin)]["pairs"].append(pair)
-        for split in linked_splits:
-            remote_bin = split.remote_pos - (
-                split.remote_pos % max(1, config.coverage_bin_size)
-            )
-            grouped[(split.remote_chrom, remote_bin)]["splits"].append(split)
-
-        for (remote_chrom, _remote_bin), group in grouped.items():
-            pairs = group["pairs"]
-            splits = group["splits"]
             support = len({item.read_name for item in pairs + splits})
             if support < config.min_bnd_support:
                 continue
-            # Report the average remote coordinate as an imprecise BND anchor.
-            # This remains a candidate junction until validated downstream.
             remote_positions = [item.mate_pos for item in pairs] + [
                 item.remote_pos for item in splits
             ]
-            remote_pos = (
-                int(round(sum(remote_positions) / len(remote_positions)))
-                if remote_positions
-                else "NA"
-            )
+            remote_pos = int(median(remote_positions))
             orientation_values = [
                 item.orientation
-                for item in pairs + splits
+                for item in (splits or pairs)
                 if getattr(item, "orientation", "NA") != "NA"
             ]
             orientation = (
@@ -307,33 +294,20 @@ def _classify_pair_only_bnd_events(
 ) -> tuple[list[RepairEvent], list[EventEvidence]]:
     events: list[RepairEvent] = []
     event_evidence: list[EventEvidence] = []
-    grouped: dict[tuple[str, int, str, int], list[DiscordantPair]] = defaultdict(
-        list
-    )
-    bin_size = max(1, config.coverage_bin_size)
-    for pair in pairs:
-        if not _is_remote_bnd_anchor(
-            pair.chrom,
-            pair.pos,
-            pair.mate_chrom,
-            pair.mate_pos,
-            config,
-        ):
-            continue
-        local_bin = pair.pos - (pair.pos % bin_size)
-        remote_bin = pair.mate_pos - (pair.mate_pos % bin_size)
-        grouped[(pair.chrom, local_bin, pair.mate_chrom, remote_bin)].append(pair)
-
-    for (
-        local_chrom,
-        local_bin,
-        remote_chrom,
-        remote_bin,
-    ), group in grouped.items():
+    eligible = [
+        pair
+        for pair in pairs
+        if _is_remote_bnd_anchor(
+            pair.chrom, pair.pos, pair.mate_chrom, pair.mate_pos, config
+        )
+    ]
+    for group in _group_pair_evidence(eligible, config.coverage_bin_size):
+        local_chrom = group[0].chrom
+        remote_chrom = group[0].mate_chrom
         local_positions = [pair.pos for pair in group]
         remote_positions = [pair.mate_pos for pair in group]
-        local_pos = int(round(sum(local_positions) / len(local_positions)))
-        remote_pos = int(round(sum(remote_positions) / len(remote_positions)))
+        local_pos = int(median(local_positions))
+        remote_pos = int(median(remote_positions))
         orientation_values = [
             pair.orientation for pair in group if pair.orientation != "NA"
         ]
@@ -348,8 +322,8 @@ def _classify_pair_only_bnd_events(
             else "BND_INTRA"
         )
         temp_event_id = (
-            f"TMP_BND_PAIRONLY_{region.region_id}_{local_chrom}_{local_bin}_"
-            f"{remote_chrom}_{remote_bin}"
+            f"TMP_BND_PAIRONLY_{region.region_id}_{local_chrom}_{local_pos}_"
+            f"{remote_chrom}_{remote_pos}"
         )
         event = RepairEvent(
             event_id=temp_event_id,
@@ -381,6 +355,94 @@ def _classify_pair_only_bnd_events(
             event_evidence.append(_pair_evidence(temp_event_id, pair))
 
     return events, event_evidence
+
+
+def _group_remote_evidence(
+    pairs: list[DiscordantPair],
+    splits: list[SplitReadEvidence],
+    window: int,
+) -> list[list[object]]:
+    def values(item: object) -> tuple[str, str, int]:
+        if isinstance(item, DiscordantPair):
+            return item.mate_chrom, item.orientation, item.mate_pos
+        assert isinstance(item, SplitReadEvidence)
+        return item.remote_chrom, item.orientation, item.remote_pos
+
+    groups: list[list[object]] = []
+    for item in sorted(splits, key=values):
+        key = values(item)
+        if groups:
+            first_key = values(groups[-1][0])
+            if key[:2] == first_key[:2] and key[2] - first_key[2] <= max(1, window):
+                groups[-1].append(item)
+                continue
+        groups.append([item])
+
+    for pair in sorted(pairs, key=values):
+        pair_chrom, pair_orientation, pair_pos = values(pair)
+        compatible = [
+            group
+            for group in groups
+            if values(group[0])[0] == pair_chrom
+            and all(abs(values(item)[2] - pair_pos) <= max(1, window) for item in group)
+        ]
+        if compatible:
+            min(
+                compatible,
+                key=lambda group: abs(
+                    median(values(item)[2] for item in group) - pair_pos
+                ),
+            ).append(pair)
+            continue
+        pair_group = next(
+            (
+                group
+                for group in groups
+                if isinstance(group[0], DiscordantPair)
+                and values(group[0])[:2] == (pair_chrom, pair_orientation)
+                and all(
+                    abs(values(item)[2] - pair_pos) <= max(1, window)
+                    for item in group
+                )
+            ),
+            None,
+        )
+        if pair_group is None:
+            groups.append([pair])
+        else:
+            pair_group.append(pair)
+    return groups
+
+
+def _group_pair_evidence(
+    pairs: list[DiscordantPair], window: int
+) -> list[list[DiscordantPair]]:
+    groups: list[list[DiscordantPair]] = []
+    for pair in sorted(
+        pairs,
+        key=lambda item: (
+            item.chrom,
+            item.mate_chrom,
+            item.orientation,
+            item.pos,
+            item.mate_pos,
+        ),
+    ):
+        if groups:
+            first = groups[-1][0]
+            if (
+                (pair.chrom, pair.mate_chrom, pair.orientation)
+                == (first.chrom, first.mate_chrom, first.orientation)
+                and all(
+                    abs(pair.pos - member.pos) <= max(1, window)
+                    and abs(pair.mate_pos - member.mate_pos) <= max(1, window)
+                    for member in groups[-1]
+                )
+            ):
+                groups[-1].append(pair)
+                continue
+        groups.append([pair])
+    return groups
 
 
 def _is_remote_bnd_anchor(
