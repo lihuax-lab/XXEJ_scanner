@@ -9,9 +9,9 @@ scanner: soft clips, local CIGAR indels, SA tags, and discordant mate fields.
 from __future__ import annotations
 
 import argparse
-import time
 import csv
 import random
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,7 +21,13 @@ CIGAR_MATCH = 0
 CIGAR_INS = 1
 CIGAR_DEL = 2
 CIGAR_SOFT_CLIP = 4
-MMEJ_MICROHOMOLOGY = "AGCTA"
+DELETION_MICROHOMOLOGY = "AGCTA"
+NEGATIVE_REGIONS = [
+    ("chrSim2", 64_500, 65_500, "NEG_CLIP_ONLY"),
+    ("chrSim2", 69_500, 70_500, "NEG_SHARED_INS"),
+    ("chrSim2", 73_500, 74_500, "NEG_DUPLICATE_INS"),
+    ("chrSim2", 76_500, 77_500, "NEG_LOW_MAPQ_INS"),
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,7 +54,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output-dir",
-        default="sim/xxej_benchmark",
+        default="sim/xxej_benchmark_v1",
         help="Directory for ref.fa, BAMs, candidate BED, and truth.tsv.",
     )
     parser.add_argument(
@@ -92,6 +98,7 @@ def main() -> int:
     events = _truth_events(args.support)
     _write_truth(output_dir / "truth.tsv", events)
     _write_candidates(output_dir / "candidates.bed", events)
+    _write_negative_regions(output_dir / "negative_regions.bed")
 
     header = {
         "HD": {"VN": "1.6", "SO": "coordinate"},
@@ -128,10 +135,96 @@ def main() -> int:
             )
         )
 
+    for chrom, start, end, name in NEGATIVE_REGIONS:
+        treated_records.extend(
+            _background_reads(
+                seqs,
+                alignment_header,
+                tid_by_chrom,
+                chrom,
+                start,
+                end,
+                args.background_reads,
+                prefix=f"treated_bg_{name.lower()}",
+            )
+        )
+        control_records.extend(
+            _background_reads(
+                seqs,
+                alignment_header,
+                tid_by_chrom,
+                chrom,
+                start,
+                end,
+                args.background_reads,
+                prefix=f"control_bg_{name.lower()}",
+            )
+        )
+
     for event in events:
         treated_records.extend(
             _event_records(seqs, alignment_header, tid_by_chrom, event, args.support)
         )
+    treated_records.extend(
+        _insertion_decoy_records(
+            seqs,
+            alignment_header,
+            tid_by_chrom,
+            "shared_ins",
+            "chrSim2",
+            70_000,
+            "CAGT",
+            args.support,
+        )
+    )
+    control_records.extend(
+        _insertion_decoy_records(
+            seqs,
+            alignment_header,
+            tid_by_chrom,
+            "control_shared_ins",
+            "chrSim2",
+            70_000,
+            "CAGT",
+            args.support,
+        )
+    )
+    treated_records.extend(
+        _insertion_decoy_records(
+            seqs,
+            alignment_header,
+            tid_by_chrom,
+            "duplicate_ins",
+            "chrSim2",
+            74_000,
+            "TGCA",
+            args.support,
+            flag=0x400,
+        )
+    )
+    treated_records.extend(
+        _insertion_decoy_records(
+            seqs,
+            alignment_header,
+            tid_by_chrom,
+            "low_mapq_ins",
+            "chrSim2",
+            77_000,
+            "ACGT",
+            args.support,
+            mapq=5,
+        )
+    )
+    treated_records.extend(
+        _clip_only_decoy_records(
+            seqs,
+            alignment_header,
+            tid_by_chrom,
+            "chrSim2",
+            65_000,
+            args.support,
+        )
+    )
 
     _write_sorted_bam(
         output_dir / "treated.sorted.bam",
@@ -153,6 +246,7 @@ def main() -> int:
     print(f"  control:   {output_dir / 'control.sorted.bam'}")
     print(f"  truth:     {output_dir / 'truth.tsv'}")
     print(f"  BED:       {output_dir / 'candidates.bed'}")
+    print(f"  negatives: {output_dir / 'negative_regions.bed'}")
     print(f"  helper:    {output_dir / 'run_scanner.sh'}")
     return 0
 
@@ -164,6 +258,7 @@ def _prepare_output_dir(output_dir: Path, *, force: bool) -> None:
         "ref.fa.fai",
         "truth.tsv",
         "candidates.bed",
+        "negative_regions.bed",
         "treated.sorted.bam",
         "treated.sorted.bam.bai",
         "control.sorted.bam",
@@ -188,23 +283,23 @@ def _build_reference(rng: random.Random) -> dict[str, str]:
         "chrSim1": list(_random_dna(rng, 220_000)),
         "chrSim2": list(_random_dna(rng, 80_000)),
     }
-    # Make every MMEJ example carry an obvious 5 bp reference microhomology.
+    # Give every deletion example an obvious 5 bp reference microhomology.
     for event in _truth_events(support=1):
-        if event.event_type != "MMEJ_DEL":
+        if event.event_type != "LOCAL_DEL":
             continue
         left_bkp = event.bkp_A_pos
         right_bkp = int(event.bkp_B_pos)
         seqs[event.chrom][
-            left_bkp - len(MMEJ_MICROHOMOLOGY) : left_bkp
-        ] = MMEJ_MICROHOMOLOGY
+            left_bkp - len(DELETION_MICROHOMOLOGY) : left_bkp
+        ] = DELETION_MICROHOMOLOGY
         seqs[event.chrom][
-            right_bkp : right_bkp + len(MMEJ_MICROHOMOLOGY)
-        ] = MMEJ_MICROHOMOLOGY
+            right_bkp : right_bkp + len(DELETION_MICROHOMOLOGY)
+        ] = DELETION_MICROHOMOLOGY
     return {chrom: "".join(seq) for chrom, seq in seqs.items()}
 
 
 def _truth_events(support: int) -> list[TruthEvent]:
-    nhej_specs = [
+    insertion_specs = [
         (24_000, "GATTACA"),
         (50_000, "TACGGA"),
         (75_000, "CCGTTA"),
@@ -213,7 +308,7 @@ def _truth_events(support: int) -> list[TruthEvent]:
         (175_000, "CGATAC"),
         (205_000, "GGAATTC"),
     ]
-    mmej_specs = [
+    deletion_specs = [
         (35_000, 35_240),
         (65_000, 65_210),
         (95_000, 95_275),
@@ -232,11 +327,11 @@ def _truth_events(support: int) -> list[TruthEvent]:
     ]
 
     events: list[TruthEvent] = []
-    for idx, (breakpoint, inserted) in enumerate(nhej_specs, 1):
+    for idx, (breakpoint, inserted) in enumerate(insertion_specs, 1):
         events.append(
             TruthEvent(
-                truth_id=f"SIM_NHEJ_INS_{idx:03d}",
-                event_type="NHEJ_INS",
+                truth_id=f"SIM_LOCAL_INS_{idx:03d}",
+                event_type="LOCAL_INS",
                 chrom="chrSim1",
                 bkp_A_pos=breakpoint,
                 bkp_B_chrom="NA",
@@ -251,11 +346,11 @@ def _truth_events(support: int) -> list[TruthEvent]:
                 candidate_end=breakpoint + 300,
             )
         )
-    for idx, (left_bkp, right_bkp) in enumerate(mmej_specs, 1):
+    for idx, (left_bkp, right_bkp) in enumerate(deletion_specs, 1):
         events.append(
             TruthEvent(
-                truth_id=f"SIM_MMEJ_DEL_{idx:03d}",
-                event_type="MMEJ_DEL",
+                truth_id=f"SIM_LOCAL_DEL_{idx:03d}",
+                event_type="LOCAL_DEL",
                 chrom="chrSim1",
                 bkp_A_pos=left_bkp,
                 bkp_B_chrom="chrSim1",
@@ -274,7 +369,7 @@ def _truth_events(support: int) -> list[TruthEvent]:
         events.append(
             TruthEvent(
                 truth_id=f"SIM_BND_INTER_{idx:03d}",
-                event_type="NHEJ_BND_INS_INTER",
+                event_type="BND_INTER",
                 chrom="chrSim1",
                 bkp_A_pos=breakpoint,
                 bkp_B_chrom=remote_chrom,
@@ -325,6 +420,14 @@ def _write_candidates(path: Path, events: list[TruthEvent]) -> None:
                     100,
                 ]
             )
+        for chrom, start, end, name in NEGATIVE_REGIONS:
+            writer.writerow([chrom, start, end, name, 0])
+
+
+def _write_negative_regions(path: Path) -> None:
+    with path.open("w", newline="") as handle:
+        writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
+        writer.writerows(NEGATIVE_REGIONS)
 
 
 def _write_sorted_bam(
@@ -392,16 +495,16 @@ def _event_records(
     event: TruthEvent,
     support: int,
 ) -> list[pysam.AlignedSegment]:
-    if event.event_type == "NHEJ_INS":
-        return _nhej_ins_records(seqs, header, tid_by_chrom, event, support)
-    if event.event_type == "MMEJ_DEL":
-        return _mmej_del_records(seqs, header, tid_by_chrom, event, support)
-    if event.event_type == "NHEJ_BND_INS_INTER":
+    if event.event_type == "LOCAL_INS":
+        return _local_ins_records(seqs, header, tid_by_chrom, event, support)
+    if event.event_type == "LOCAL_DEL":
+        return _local_del_records(seqs, header, tid_by_chrom, event, support)
+    if event.event_type == "BND_INTER":
         return _bnd_inter_records(seqs, header, tid_by_chrom, event, support)
     raise ValueError(f"Unsupported benchmark event type: {event.event_type}")
 
 
-def _nhej_ins_records(
+def _local_ins_records(
     seqs: dict[str, str],
     header: pysam.AlignmentHeader,
     tid_by_chrom: dict[str, int],
@@ -458,7 +561,7 @@ def _nhej_ins_records(
     return records
 
 
-def _mmej_del_records(
+def _local_del_records(
     seqs: dict[str, str],
     header: pysam.AlignmentHeader,
     tid_by_chrom: dict[str, int],
@@ -570,6 +673,69 @@ def _bnd_inter_records(
     return records
 
 
+def _insertion_decoy_records(
+    seqs: dict[str, str],
+    header: pysam.AlignmentHeader,
+    tid_by_chrom: dict[str, int],
+    prefix: str,
+    chrom: str,
+    breakpoint: int,
+    inserted: str,
+    support: int,
+    *,
+    flag: int = 0,
+    mapq: int = 60,
+) -> list[pysam.AlignedSegment]:
+    records: list[pysam.AlignedSegment] = []
+    for idx in range(support):
+        flank = 60
+        start = breakpoint - flank
+        records.append(
+            _segment(
+                header,
+                tid_by_chrom,
+                query_name=f"{prefix}_{idx:03d}",
+                chrom=chrom,
+                start=start,
+                cigar=[
+                    (CIGAR_MATCH, flank),
+                    (CIGAR_INS, len(inserted)),
+                    (CIGAR_MATCH, flank),
+                ],
+                query_sequence=(
+                    _ref(seqs, chrom, start, flank)
+                    + inserted
+                    + _ref(seqs, chrom, breakpoint, flank)
+                ),
+                flag=flag,
+                mapq=mapq,
+            )
+        )
+    return records
+
+
+def _clip_only_decoy_records(
+    seqs: dict[str, str],
+    header: pysam.AlignmentHeader,
+    tid_by_chrom: dict[str, int],
+    chrom: str,
+    breakpoint: int,
+    support: int,
+) -> list[pysam.AlignedSegment]:
+    return [
+        _segment(
+            header,
+            tid_by_chrom,
+            query_name=f"clip_only_{idx:03d}",
+            chrom=chrom,
+            start=breakpoint,
+            cigar=[(CIGAR_SOFT_CLIP, 30), (CIGAR_MATCH, 90)],
+            query_sequence="A" * 30 + _ref(seqs, chrom, breakpoint, 90),
+        )
+        for idx in range(support)
+    ]
+
+
 def _segment(
     header: pysam.AlignmentHeader,
     tid_by_chrom: dict[str, int],
@@ -605,29 +771,28 @@ def _segment(
 
 def _write_helper_commands(output_dir: Path) -> None:
     script = output_dir / "run_scanner.sh"
-    scanner_out = output_dir / "scanner_out"
     script.write_text(
         "\n".join(
             [
                 "#!/usr/bin/env bash",
                 "set -euo pipefail",
                 'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"',
-                'PROJECT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"',
+                'PROJECT_DIR="${XXEJ_SCANNER_PROJECT_DIR:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"',
                 'cd "${PROJECT_DIR}"',
                 "",
                 "uv run --no-editable XXEJ_scanner scan \\",
-                f"  --treated-bam {output_dir / 'treated.sorted.bam'} \\",
-                f"  --control-bam {output_dir / 'control.sorted.bam'} \\",
-                f"  --reference-fasta {output_dir / 'ref.fa'} \\",
-                f"  --candidate-bed {output_dir / 'candidates.bed'} \\",
-                f"  --output-dir {scanner_out} \\",
+                '  --treated-bam "${SCRIPT_DIR}/treated.sorted.bam" \\',
+                '  --control-bam "${SCRIPT_DIR}/control.sorted.bam" \\',
+                '  --reference-fasta "${SCRIPT_DIR}/ref.fa" \\',
+                '  --output-dir "${SCRIPT_DIR}/scanner_out" \\',
                 "  --min-alt-support 3 \\",
                 "  --min-bnd-support 3 \\",
                 "  --depth-count-method region",
                 "",
-                "uv run python scripts/evaluate_xxej_benchmark.py \\",
-                f"  --truth {output_dir / 'truth.tsv'} \\",
-                f"  --events {scanner_out / 'events.tsv'}",
+                "uv run --no-editable python scripts/evaluate_xxej_benchmark.py \\",
+                '  --truth "${SCRIPT_DIR}/truth.tsv" \\',
+                '  --events "${SCRIPT_DIR}/scanner_out/events.tsv" \\',
+                '  --matches-out "${SCRIPT_DIR}/scanner_out/matches.tsv"',
                 "",
             ]
         )

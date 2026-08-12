@@ -16,6 +16,8 @@ from .classify import assign_final_event_ids, classify_local_events
 from .coverage import (
     annotate_region_coverage,
     call_candidate_regions,
+    call_structural_evidence_regions,
+    merge_candidate_bins,
     parse_bed_regions,
 )
 from .genotype import count_ref_like_breakends, update_event_fraction
@@ -102,8 +104,6 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--max-local-event-distance", type=int, default=10000)
     scan.add_argument("--max-insertion-length", type=int, default=50)
     scan.add_argument("--min-indel-length", type=int, default=1)
-    scan.add_argument("--min-nhej-ins-indel-support", type=int, default=1)
-    scan.add_argument("--allow-clip-only-nhej-ins", action="store_true")
     scan.add_argument("--min-microhomology-length", type=int, default=1)
     scan.add_argument("--max-microhomology-length", type=int, default=20)
     scan.add_argument("--microhomology-search-window", type=int, default=5)
@@ -152,8 +152,6 @@ def _config_from_args(args: argparse.Namespace) -> ScannerConfig:
         max_local_event_distance=args.max_local_event_distance,
         max_insertion_length=args.max_insertion_length,
         min_indel_length=args.min_indel_length,
-        min_nhej_ins_indel_support=args.min_nhej_ins_indel_support,
-        allow_clip_only_nhej_ins=args.allow_clip_only_nhej_ins,
         min_microhomology_length=args.min_microhomology_length,
         max_microhomology_length=args.max_microhomology_length,
         microhomology_search_window=args.microhomology_search_window,
@@ -167,7 +165,7 @@ def run_scan(config: ScannerConfig) -> dict[str, object]:
     validate_inputs(config)
     output_paths = prepare_output_dir(config.output_dir)
 
-    log("[2/6] Calling candidate regions")
+    log("[2/6] Calling coverage and structural-evidence candidate regions")
     # BED input is treated as a search-space hint, not as a called repair event.
     # Coverage statistics are still annotated so candidate_regions.bed remains
     # comparable between BED-driven and de novo scans.
@@ -175,11 +173,13 @@ def run_scan(config: ScannerConfig) -> dict[str, object]:
         input_bed = config.candidate_bed or config.peak_bed
         assert input_bed is not None
         regions = parse_bed_regions(input_bed)
-        regions = annotate_region_coverage(
-            regions, config.treated_bam, config, config.control_bam
-        )
     else:
         regions = call_candidate_regions(config.treated_bam, config, config.control_bam)
+    structural_regions = call_structural_evidence_regions(config.treated_bam, config)
+    regions = merge_candidate_bins([*regions, *structural_regions], 0)
+    regions = annotate_region_coverage(
+        regions, config.treated_bam, config, config.control_bam
+    )
 
     all_clusters: list[BreakpointCluster] = []
     all_events: list[RepairEvent] = []
@@ -296,6 +296,9 @@ def run_scan(config: ScannerConfig) -> dict[str, object]:
                 all_events.append(event)
             all_event_evidence.extend(event_evidence)
 
+    all_events, all_event_evidence = _deduplicate_bnd_events(
+        all_events, all_event_evidence, config.coverage_bin_size
+    )
     assign_final_event_ids(all_events, all_event_evidence)
 
     log("[6/6] Writing outputs")
@@ -316,6 +319,7 @@ def run_scan(config: ScannerConfig) -> dict[str, object]:
         "control_bam": str(Path(config.control_bam)) if config.control_bam else None,
         "reference_fasta": str(Path(config.reference_fasta)),
         "candidate_regions": len(regions),
+        "structural_candidate_regions": len(structural_regions),
         "cluster_method": config.cluster_method,
         "breakpoint_clusters": len(all_clusters),
         "events": len(all_events),
@@ -327,6 +331,84 @@ def run_scan(config: ScannerConfig) -> dict[str, object]:
     }
     write_run_summary_json(output_paths["run_summary"], summary)
     return summary
+
+
+def _deduplicate_bnd_events(
+    events: list[RepairEvent],
+    evidence: list[EventEvidence],
+    window: int,
+) -> tuple[list[RepairEvent], list[EventEvidence]]:
+    """Collapse mirrored regional calls for the same unordered breakend pair."""
+    def canonical_breakends(
+        event: RepairEvent,
+    ) -> tuple[list[tuple[str, int]], str]:
+        endpoints = [
+            (event.bkp_A_chrom, int(event.bkp_A_pos)),
+            (event.bkp_B_chrom, int(event.bkp_B_pos)),
+        ]
+        orientation = event.orientation
+        if endpoints[1] < endpoints[0]:
+            endpoints.reverse()
+            if orientation != "NA" and len(orientation) == 2:
+                orientation = orientation[::-1]
+        return endpoints, orientation
+
+    kept: list[RepairEvent] = []
+    aliases: dict[str, str] = {}
+    for event in events:
+        if event.event_type not in {"BND_INTRA", "BND_INTER"}:
+            kept.append(event)
+            continue
+        endpoints, orientation = canonical_breakends(event)
+        matching = next(
+            (
+                candidate
+                for candidate in kept
+                if candidate.event_type == event.event_type
+                and (
+                    orientation == "NA"
+                    or canonical_breakends(candidate)[1] == "NA"
+                    or canonical_breakends(candidate)[1] == orientation
+                )
+                and all(
+                    left[0] == right[0]
+                    and abs(left[1] - right[1]) <= max(1, window)
+                    for left, right in zip(
+                        canonical_breakends(candidate)[0],
+                        endpoints,
+                    )
+                )
+            ),
+            None,
+        )
+        if matching is None:
+            kept.append(event)
+            continue
+        current_rank = (
+            matching.filter == "PASS",
+            matching.junction_resolved,
+            matching.bkp_A_side != "pair_only",
+            matching.alt_support,
+        )
+        new_rank = (
+            event.filter == "PASS",
+            event.junction_resolved,
+            event.bkp_A_side != "pair_only",
+            event.alt_support,
+        )
+        if new_rank > current_rank:
+            kept[kept.index(matching)] = event
+            aliases[matching.event_id] = event.event_id
+            event.support_read_names.update(matching.support_read_names)
+        else:
+            aliases[event.event_id] = matching.event_id
+            matching.support_read_names.update(event.support_read_names)
+
+    for row in evidence:
+        while row.event_id in aliases:
+            row.event_id = aliases[row.event_id]
+    kept_ids = {event.event_id for event in kept}
+    return kept, [row for row in evidence if row.event_id in kept_ids]
 
 
 def _combined_ref_support(event: RepairEvent, *, control: bool = False) -> int:

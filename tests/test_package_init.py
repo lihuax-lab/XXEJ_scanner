@@ -26,6 +26,7 @@ class PackageInitTest(unittest.TestCase):
             "run_scan",
             "parse_bed_regions",
             "call_candidate_regions",
+            "call_structural_evidence_regions",
             "collect_region_evidence",
             "cluster_clip_sites",
             "cluster_evidence_graph",

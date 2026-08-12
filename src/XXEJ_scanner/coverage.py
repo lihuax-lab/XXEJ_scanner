@@ -8,7 +8,12 @@ from pathlib import Path
 
 import pysam
 
-from .bam_evidence import passes_read_filters
+from .bam_evidence import (
+    extract_cigar_indels_from_read,
+    extract_discordant_pair_from_read,
+    extract_split_reads_from_sa_tag,
+    passes_read_filters,
+)
 from .models import CandidateRegion, ScannerConfig
 from .utils import clamp_start, percentile
 
@@ -187,6 +192,127 @@ def call_candidate_regions(
         )
 
     return merge_candidate_bins(selected, config.merge_distance)
+
+
+def call_structural_evidence_regions(
+    bam_path: str,
+    config: ScannerConfig,
+) -> list[CandidateRegion]:
+    """Discover search intervals from resolved indels and remote alignments."""
+    indel_support: dict[tuple[object, ...], set[str]] = {}
+    remote_anchors: list[tuple[str, int, str, int, str]] = []
+
+    with pysam.AlignmentFile(bam_path, "rb") as bam:
+        for read in bam.fetch():
+            if not passes_read_filters(read, config):
+                continue
+            for indel in extract_cigar_indels_from_read(read, config):
+                if indel.operation == "INS" and (
+                    indel.length > config.max_insertion_length
+                    or indel.sequence == "NA"
+                ):
+                    continue
+                if (
+                    indel.operation == "DEL"
+                    and indel.length > config.max_local_event_distance
+                ):
+                    continue
+                key = (
+                    indel.chrom,
+                    indel.start,
+                    indel.end,
+                    indel.operation,
+                    indel.sequence,
+                )
+                indel_support.setdefault(key, set()).add(indel.read_name)
+            pair = extract_discordant_pair_from_read(read, config)
+            if pair:
+                remote_anchors.append(
+                    (
+                        pair.chrom,
+                        pair.pos,
+                        pair.mate_chrom,
+                        pair.mate_pos,
+                        pair.read_name,
+                    )
+                )
+            remote_anchors.extend(
+                (
+                    split.chrom,
+                    split.pos,
+                    split.remote_chrom,
+                    split.remote_pos,
+                    split.read_name,
+                )
+                for split in extract_split_reads_from_sa_tag(read, config)
+            )
+
+    regions: list[CandidateRegion] = []
+    for (chrom, start, end, _operation, _sequence), read_names in sorted(
+        indel_support.items()
+    ):
+        if len(read_names) < config.min_alt_support:
+            continue
+        regions.append(
+            CandidateRegion(
+                chrom=chrom,
+                start=clamp_start(start - config.scan_padding),
+                end=max(end, start + 1) + config.scan_padding,
+                region_id=f"structural_indel_{len(regions) + 1}",
+                score=float(len(read_names)),
+            )
+        )
+
+    for group in _group_remote_anchors(remote_anchors, config.coverage_bin_size):
+        read_names = {anchor[4] for anchor in group}
+        local_relation = group[0][0] == group[0][2] and all(
+            abs(anchor[1] - anchor[3]) <= config.max_local_event_distance
+            for anchor in group
+        )
+        required_support = (
+            config.min_alt_support if local_relation else config.min_bnd_support
+        )
+        if len(read_names) < required_support:
+            continue
+        chrom = group[0][0]
+        positions = [anchor[1] for anchor in group]
+        regions.append(
+            CandidateRegion(
+                chrom=chrom,
+                start=clamp_start(min(positions) - config.scan_padding),
+                end=max(positions) + config.scan_padding + 1,
+                region_id=f"structural_remote_{len(regions) + 1}",
+                score=float(len(read_names)),
+            )
+        )
+
+    return merge_candidate_bins(regions, 0)
+
+
+def _group_remote_anchors(
+    anchors: list[tuple[str, int, str, int, str]],
+    window: int,
+) -> list[list[tuple[str, int, str, int, str]]]:
+    """Group remote evidence without fixed-bin boundary loss or chaining."""
+    groups: list[list[tuple[str, int, str, int, str]]] = []
+    for anchor in sorted(
+        anchors, key=lambda item: (item[0], item[2], item[1], item[3])
+    ):
+        if groups:
+            first = groups[-1][0]
+            if (
+                anchor[0] == first[0]
+                and anchor[2] == first[2]
+                and all(
+                    abs(anchor[1] - member[1]) <= max(1, window)
+                    and abs(anchor[3] - member[3]) <= max(1, window)
+                    for member in groups[-1]
+                )
+            ):
+                groups[-1].append(anchor)
+                continue
+        groups.append([anchor])
+    return groups
 
 
 def merge_candidate_bins(
