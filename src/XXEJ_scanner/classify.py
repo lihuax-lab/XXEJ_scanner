@@ -626,9 +626,7 @@ def _classify_local_ins(
     rows: list[EventEvidence] = []
     for (chrom, pos, sequence), insertions in sorted(grouped.items()):
         support_reads = {indel.read_name for indel in insertions}
-        if len(support_reads) < max(
-            config.min_alt_support, config.min_nhej_ins_indel_support
-        ):
+        if len(support_reads) < config.min_alt_support:
             continue
         cluster = _nearest_cluster(
             clusters,

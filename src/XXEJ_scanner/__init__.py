@@ -26,6 +26,7 @@ from .cli import run_scan
 from .coverage import (
     annotate_region_coverage,
     call_candidate_regions,
+    call_structural_evidence_regions,
     parse_bed_regions,
 )
 from .genotype import (
@@ -78,6 +79,7 @@ __all__ = [
     "assign_final_event_ids",
     "BreakpointCluster",
     "call_candidate_regions",
+    "call_structural_evidence_regions",
     "CandidateRegion",
     "check_clipped_sequence_against_reference",
     "CigarIndel",

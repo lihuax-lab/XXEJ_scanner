@@ -104,19 +104,31 @@ def _is_compatible(
 ) -> bool:
     if truth["event_type"] != event.get("event_type"):
         return False
+    event_type = truth["event_type"]
+    if event_type.startswith("BND_"):
+        direct = (
+            truth["chrom"] == event.get("bkp_A_chrom")
+            and truth.get("remote_chrom") == event.get("bkp_B_chrom")
+            and _near(truth.get("bkp_A_pos"), event.get("bkp_A_pos"), window)
+            and _near(truth.get("remote_pos"), event.get("bkp_B_pos"), window)
+        )
+        reverse = (
+            truth["chrom"] == event.get("bkp_B_chrom")
+            and truth.get("remote_chrom") == event.get("bkp_A_chrom")
+            and _near(truth.get("bkp_A_pos"), event.get("bkp_B_pos"), window)
+            and _near(truth.get("remote_pos"), event.get("bkp_A_pos"), window)
+        )
+        return direct or reverse
     if truth["chrom"] != event.get("chrom"):
         return False
     if not _near(truth.get("bkp_A_pos"), event.get("bkp_A_pos"), window):
         return False
 
-    event_type = truth["event_type"]
-    if event_type == "MMEJ_DEL":
+    if event_type == "LOCAL_INS":
+        return truth.get("inserted_sequence") == event.get("inserted_sequence")
+    if event_type == "LOCAL_DEL":
         return truth.get("bkp_B_chrom") == event.get("bkp_B_chrom") and _near(
             truth.get("bkp_B_pos"), event.get("bkp_B_pos"), window
-        )
-    if event_type.startswith("NHEJ_BND"):
-        return truth.get("remote_chrom") == event.get("remote_chrom") and _near(
-            truth.get("remote_pos"), event.get("remote_pos"), window
         )
     return True
 
@@ -126,11 +138,26 @@ def _match_distance(
     event: dict[str, str],
     window: int,
 ) -> int:
+    if truth["event_type"].startswith("BND_"):
+        direct = (
+            _distance(truth.get("bkp_A_pos"), event.get("bkp_A_pos"), window)
+            + _distance(truth.get("remote_pos"), event.get("bkp_B_pos"), window)
+            if truth["chrom"] == event.get("bkp_A_chrom")
+            and truth.get("remote_chrom") == event.get("bkp_B_chrom")
+            else 2 * (window + 1)
+        )
+        reverse = (
+            _distance(truth.get("bkp_A_pos"), event.get("bkp_B_pos"), window)
+            + _distance(truth.get("remote_pos"), event.get("bkp_A_pos"), window)
+            if truth["chrom"] == event.get("bkp_B_chrom")
+            and truth.get("remote_chrom") == event.get("bkp_A_chrom")
+            else 2 * (window + 1)
+        )
+        return min(direct, reverse)
+
     distance = _distance(truth.get("bkp_A_pos"), event.get("bkp_A_pos"), window)
-    if truth["event_type"] == "MMEJ_DEL":
+    if truth["event_type"] == "LOCAL_DEL":
         distance += _distance(truth.get("bkp_B_pos"), event.get("bkp_B_pos"), window)
-    elif truth["event_type"].startswith("NHEJ_BND"):
-        distance += _distance(truth.get("remote_pos"), event.get("remote_pos"), window)
     return distance
 
 

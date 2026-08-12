@@ -35,12 +35,6 @@ def assign_event_filter(event: RepairEvent, config: ScannerConfig) -> str:
             return "NoControlCoverage"
     if event.normal_noise > config.max_normal_clip_rate:
         return "HighControlNoise"
-    if (
-        event.event_type == "LOCAL_INS"
-        and not config.allow_clip_only_nhej_ins
-        and event.alt_indel_support < config.min_nhej_ins_indel_support
-    ):
-        return "NoInsertionEvidence"
     if event.event_type == "LOCAL_DEL" and not event.junction_resolved:
         return "NoJunctionEvidence"
     if event.event_type.startswith("BND_") and (
@@ -91,8 +85,6 @@ def second_pass_validate_event(
         if event.event_type.startswith("BND_")
         else config.min_alt_support
     )
-    if event.event_type == "LOCAL_INS":
-        threshold = max(threshold, config.min_nhej_ins_indel_support)
     if len(strict_support) < threshold:
         event.filter = "LowSupport"
         if event.notes:
