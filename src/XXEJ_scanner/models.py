@@ -35,6 +35,7 @@ class ScannerConfig:
     coverage_bin_size: int = 100
     merge_distance: int = 300
     max_normal_clip_rate: float = 0.05
+    max_control_alt_support: int = 1
     min_alt_support: int = 3
     min_bnd_support: int = 3
     min_treated_coverage: float = 5.0
@@ -200,12 +201,17 @@ class RepairEvent:
     alt_discordant_pair_support: int = 0
     alt_indel_support: int = 0
     ref_spanning_support: int = 0
+    ref_support_A: int = 0
+    ref_support_B: int | str = "NA"
     treated_depth: int = 0
     control_depth: int = 0
-    repair_evidence_fraction: float = 0.0
+    repair_evidence_fraction: float | str = "NA"
     control_alt_support: int = 0
     control_ref_support: int = 0
-    control_repair_evidence_fraction: float = 0.0
+    control_ref_support_A: int = 0
+    control_ref_support_B: int | str = "NA"
+    control_repair_evidence_fraction: float | str = "NA"
+    control_assessed: bool = False
     score: float = 0.0
     filter: str = "NA"
     notes: str = ""

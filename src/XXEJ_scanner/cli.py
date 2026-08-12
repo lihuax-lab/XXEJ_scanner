@@ -18,7 +18,7 @@ from .coverage import (
     call_candidate_regions,
     parse_bed_regions,
 )
-from .genotype import count_ref_like_reads, update_event_fraction
+from .genotype import count_ref_like_breakends, update_event_fraction
 from .io import (
     prepare_output_dir,
     write_breakpoint_clusters_tsv,
@@ -40,7 +40,11 @@ from .models import (
 )
 from .reference import ReferenceGenome
 from .utils import log, validate_inputs
-from .validation import assign_event_filter, second_pass_validate_event
+from .validation import (
+    assign_event_filter,
+    matching_event_read_names,
+    second_pass_validate_event,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -78,6 +82,7 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--coverage-bin-size", type=int, default=100)
     scan.add_argument("--merge-distance", type=int, default=300)
     scan.add_argument("--max-normal-clip-rate", type=float, default=0.05)
+    scan.add_argument("--max-control-alt-support", type=int, default=1)
     scan.add_argument("--min-alt-support", type=int, default=3)
     scan.add_argument("--min-bnd-support", type=int, default=3)
     scan.add_argument("--min-treated-coverage", type=float, default=5.0)
@@ -129,6 +134,7 @@ def _config_from_args(args: argparse.Namespace) -> ScannerConfig:
         coverage_bin_size=args.coverage_bin_size,
         merge_distance=args.merge_distance,
         max_normal_clip_rate=args.max_normal_clip_rate,
+        max_control_alt_support=args.max_control_alt_support,
         min_alt_support=args.min_alt_support,
         min_bnd_support=args.min_bnd_support,
         min_treated_coverage=args.min_treated_coverage,
@@ -262,18 +268,26 @@ def run_scan(config: ScannerConfig) -> dict[str, object]:
                 # classification: event evidence asks "is there abnormal
                 # structure?", while ref_spanning_support asks "how much intact
                 # local sequence is still visible around this breakpoint?".
-                event.ref_spanning_support = count_ref_like_reads(
+                event.ref_support_A, event.ref_support_B = count_ref_like_breakends(
                     config.treated_bam, event, config
                 )
+                event.ref_spanning_support = _combined_ref_support(event)
                 if config.control_bam:
-                    event.control_ref_support = count_ref_like_reads(
+                    (
+                        event.control_ref_support_A,
+                        event.control_ref_support_B,
+                    ) = count_ref_like_breakends(
                         config.control_bam, event, config
                     )
+                    event.control_ref_support = _combined_ref_support(
+                        event, control=True
+                    )
                     event.control_alt_support = (
-                        _control_alt_support(event, control_evidence, config)
+                        len(matching_event_read_names(event, control_evidence, config))
                         if control_evidence
                         else 0
                     )
+                    event.control_assessed = True
                 update_event_fraction(event)
                 event.filter = assign_event_filter(event, config)
                 # The second pass re-queries a narrower interval with stricter
@@ -315,40 +329,11 @@ def run_scan(config: ScannerConfig) -> dict[str, object]:
     return summary
 
 
-def _control_alt_support(
-    event: RepairEvent, control_evidence: object, config: ScannerConfig
-) -> int:
-    # Mirror the treated ALT-like evidence definition in the control sample so
-    # recurrent mapping artifacts can be downweighted in filters and summaries.
-    support = set()
-    for site in control_evidence.clip_sites:
-        if (
-            site.chrom == event.chrom
-            and abs(site.pos - int(event.bkp_A_pos)) <= config.clip_cluster_window
-        ):
-            support.add(site.read_name)
-    for indel in control_evidence.indels:
-        if (
-            indel.chrom == event.chrom
-            and int(event.start) - config.clip_cluster_window
-            <= indel.start
-            <= int(event.end) + config.clip_cluster_window
-        ):
-            support.add(indel.read_name)
-    if event.event_type.startswith("BND_"):
-        for pair in control_evidence.discordant_pairs:
-            if (
-                pair.chrom == event.chrom
-                and abs(pair.pos - int(event.bkp_A_pos)) <= config.clip_cluster_window
-            ):
-                support.add(pair.read_name)
-        for split in control_evidence.split_reads:
-            if (
-                split.chrom == event.chrom
-                and abs(split.pos - int(event.bkp_A_pos)) <= config.clip_cluster_window
-            ):
-                support.add(split.read_name)
-    return len(support)
+def _combined_ref_support(event: RepairEvent, *, control: bool = False) -> int:
+    prefix = "control_" if control else ""
+    support_a = int(getattr(event, f"{prefix}ref_support_A"))
+    support_b = getattr(event, f"{prefix}ref_support_B")
+    return min(support_a, int(support_b)) if support_b != "NA" else support_a
 
 
 def main(argv: list[str] | None = None) -> int:
