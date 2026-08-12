@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from .bam_evidence import collect_region_evidence
-from .models import CandidateRegion, RepairEvent, ScannerConfig
+from .models import CandidateRegion, RegionEvidence, RepairEvent, ScannerConfig
 
 
 def is_pair_only_bnd(event: RepairEvent) -> bool:
@@ -24,6 +24,15 @@ def assign_event_filter(event: RepairEvent, config: ScannerConfig) -> str:
         return "ClipOnly"
     if event.alt_support < config.min_alt_support:
         return "LowSupport"
+    if event.control_assessed:
+        if event.control_alt_support > config.max_control_alt_support:
+            return "PresentInControl"
+        if (
+            event.control_alt_support == 0
+            and event.control_ref_support == 0
+            and event.control_depth <= 0
+        ):
+            return "NoControlCoverage"
     if event.normal_noise > config.max_normal_clip_rate:
         return "HighControlNoise"
     if (
@@ -55,52 +64,36 @@ def second_pass_validate_event(
         event.filter = "PairOnlyBnd"
         return event
 
-    region = CandidateRegion(
-        chrom=event.chrom,
-        start=max(0, int(event.bkp_A_pos) - config.second_pass_window),
-        end=int(event.bkp_A_pos) + config.second_pass_window,
-        region_id=f"{event.event_id}_second_pass",
-    )
-    strict_evidence = collect_region_evidence(
-        treated_bam,
-        region,
-        config,
-        padding=0,
-        min_mapq=config.strict_min_mapq,
-    )
-    strict_clip_support = {
-        site.read_name
-        for site in strict_evidence.clip_sites
-        if abs(site.pos - int(event.bkp_A_pos)) <= config.clip_cluster_window
-    }
-    strict_indel_support = {
-        indel.read_name
-        for indel in strict_evidence.indels
-        if event.start - config.clip_cluster_window
-        <= indel.start
-        <= event.end + config.clip_cluster_window
-    }
-    strict_remote_support = {
-        pair.read_name for pair in strict_evidence.discordant_pairs
-    } | {split.read_name for split in strict_evidence.split_reads}
+    loci = [(event.bkp_A_chrom, int(event.bkp_A_pos))]
+    if event.bkp_B_chrom != "NA" and event.bkp_B_pos != "NA":
+        loci.append((event.bkp_B_chrom, int(event.bkp_B_pos)))
+    strict_support: set[str] = set()
+    for idx, (chrom, pos) in enumerate(dict.fromkeys(loci), 1):
+        region = CandidateRegion(
+            chrom=chrom,
+            start=max(0, pos - config.second_pass_window),
+            end=pos + config.second_pass_window,
+            region_id=f"{event.event_id}_second_pass_{idx}",
+        )
+        strict_evidence = collect_region_evidence(
+            treated_bam,
+            region,
+            config,
+            padding=0,
+            min_mapq=config.strict_min_mapq,
+        )
+        strict_support.update(
+            matching_event_read_names(event, strict_evidence, config)
+        )
 
-    if (
-        event.event_type == "LOCAL_INS"
-        and not config.allow_clip_only_nhej_ins
-        and len(strict_indel_support) < config.min_nhej_ins_indel_support
-    ):
-        event.filter = "NoInsertionEvidence"
-        if event.notes:
-            event.notes += " "
-        event.notes += "Second-pass strict insertion support was below threshold."
-        return event
-
-    # Any strict evidence class can rescue the event, but it must reach the same
-    # minimum support threshold used during discovery.
-    strict_total = len(
-        strict_clip_support | strict_indel_support | strict_remote_support
+    threshold = (
+        config.min_bnd_support
+        if event.event_type.startswith("BND_")
+        else config.min_alt_support
     )
-    if strict_total < config.min_alt_support:
+    if event.event_type == "LOCAL_INS":
+        threshold = max(threshold, config.min_nhej_ins_indel_support)
+    if len(strict_support) < threshold:
         event.filter = "LowSupport"
         if event.notes:
             event.notes += " "
@@ -109,3 +102,93 @@ def second_pass_validate_event(
 
     event.filter = assign_event_filter(event, config)
     return event
+
+
+def matching_event_read_names(
+    event: RepairEvent,
+    evidence: RegionEvidence,
+    config: ScannerConfig,
+) -> set[str]:
+    if event.event_type == "LOCAL_INS":
+        return {
+            indel.read_name
+            for indel in evidence.indels
+            if indel.operation == "INS"
+            and indel.chrom == event.bkp_A_chrom
+            and indel.start == int(event.bkp_A_pos)
+            and indel.sequence == event.inserted_sequence
+        }
+    if event.event_type == "LOCAL_DEL":
+        support = {
+            indel.read_name
+            for indel in evidence.indels
+            if indel.operation == "DEL"
+            and indel.chrom == event.bkp_A_chrom
+            and indel.start == int(event.bkp_A_pos)
+            and indel.end == int(event.bkp_B_pos)
+        }
+        for split in evidence.split_reads:
+            if (
+                split.chrom != event.bkp_A_chrom
+                or split.remote_chrom != event.bkp_B_chrom
+            ):
+                continue
+            if sorted((split.pos, split.remote_pos)) == [
+                int(event.bkp_A_pos),
+                int(event.bkp_B_pos),
+            ]:
+                support.add(split.read_name)
+        return support
+
+    support: set[str] = set()
+    for pair in evidence.discordant_pairs:
+        if _relation_matches(
+            event,
+            pair.chrom,
+            pair.pos,
+            pair.mate_chrom,
+            pair.mate_pos,
+            config,
+        ):
+            support.add(pair.read_name)
+    for split in evidence.split_reads:
+        relation = _relation_matches(
+            event,
+            split.chrom,
+            split.pos,
+            split.remote_chrom,
+            split.remote_pos,
+            config,
+        )
+        if relation == "direct" and split.orientation == event.orientation:
+            support.add(split.read_name)
+        elif relation == "swapped" and split.orientation[::-1] == event.orientation:
+            support.add(split.read_name)
+    return support
+
+
+def _relation_matches(
+    event: RepairEvent,
+    local_chrom: str,
+    local_pos: int,
+    remote_chrom: str,
+    remote_pos: int,
+    config: ScannerConfig,
+) -> str:
+    local_window = config.clip_cluster_window * 3
+    remote_window = config.coverage_bin_size
+    if (
+        local_chrom == event.bkp_A_chrom
+        and remote_chrom == event.bkp_B_chrom
+        and abs(local_pos - int(event.bkp_A_pos)) <= local_window
+        and abs(remote_pos - int(event.bkp_B_pos)) <= remote_window
+    ):
+        return "direct"
+    if (
+        local_chrom == event.bkp_B_chrom
+        and remote_chrom == event.bkp_A_chrom
+        and abs(local_pos - int(event.bkp_B_pos)) <= remote_window
+        and abs(remote_pos - int(event.bkp_A_pos)) <= local_window
+    ):
+        return "swapped"
+    return ""

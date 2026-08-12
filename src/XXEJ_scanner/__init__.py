@@ -30,6 +30,7 @@ from .coverage import (
 )
 from .genotype import (
     compute_repair_evidence_fraction,
+    count_ref_like_breakends,
     count_ref_like_reads,
     update_event_fraction,
 )
@@ -91,6 +92,7 @@ __all__ = [
     "collect_region_evidence",
     "compute_repair_evidence_fraction",
     "count_depth",
+    "count_ref_like_breakends",
     "count_ref_like_reads",
     "count_spanning_reads",
     "detect_microhomology",
