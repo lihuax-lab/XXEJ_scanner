@@ -15,7 +15,7 @@ class EventsTsvTest(unittest.TestCase):
     def test_microhomology_fields_are_appended_after_existing_event_fields(self) -> None:
         event = RepairEvent(
             event_id="XEJ_000001",
-            event_type="MMEJ_DEL",
+            event_type="LOCAL_DEL",
             chrom="chr1",
             start=10,
             end=20,
@@ -51,6 +51,8 @@ class EventsTsvTest(unittest.TestCase):
             "microhomology_low_complexity",
             "junction_evidence_support",
             "junction_evidence_types",
+            "evidence_level",
+            "junction_resolved",
         ])
 
 

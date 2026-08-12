@@ -26,7 +26,7 @@ class PairOnlyBndFilterTest(unittest.TestCase):
     def test_pair_only_bnd_filter_survives_second_pass(self) -> None:
         event = RepairEvent(
             event_id="TMP_BND_PAIRONLY_region1_chr1_100_chr2_500",
-            event_type="NHEJ_BND_INS_INTER",
+            event_type="BND_INTER",
             chrom="chr1",
             start=99,
             end=101,

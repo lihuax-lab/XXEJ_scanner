@@ -8,10 +8,10 @@ from typing import Literal
 ClipSide = Literal["left_clip", "right_clip"]
 ClusterMethod = Literal["window", "evidence-graph"]
 EventType = Literal[
-    "NHEJ_INS",
-    "MMEJ_DEL",
-    "NHEJ_BND_INS_INTRA",
-    "NHEJ_BND_INS_INTER",
+    "LOCAL_INS",
+    "LOCAL_DEL",
+    "BND_INTRA",
+    "BND_INTER",
 ]
 
 
@@ -220,6 +220,8 @@ class RepairEvent:
     microhomology_low_complexity: bool = False
     junction_evidence_support: int = 0
     junction_evidence_types: set[str] = field(default_factory=set)
+    evidence_level: str = "CLIP_ONLY"
+    junction_resolved: bool = False
     support_read_names: set[str] = field(default_factory=set, repr=False)
 
     @property
@@ -233,6 +235,20 @@ class RepairEvent:
             + self.alt_split_support
             + self.alt_discordant_pair_support
             + self.alt_indel_support
+        )
+
+    @property
+    def allele_key(self) -> tuple[object, ...]:
+        """Return the structural allele represented by this event."""
+        return (
+            self.event_type,
+            self.bkp_A_chrom,
+            self.bkp_A_pos,
+            self.bkp_A_side,
+            self.bkp_B_chrom,
+            self.bkp_B_pos,
+            self.bkp_B_side,
+            self.inserted_sequence,
         )
 
 

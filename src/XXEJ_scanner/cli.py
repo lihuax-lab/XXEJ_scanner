@@ -333,7 +333,7 @@ def _control_alt_support(
             <= int(event.end) + config.clip_cluster_window
         ):
             support.add(indel.read_name)
-    if event.event_type.startswith("NHEJ_BND"):
+    if event.event_type.startswith("BND_"):
         for pair in control_evidence.discordant_pairs:
             if (
                 pair.chrom == event.chrom

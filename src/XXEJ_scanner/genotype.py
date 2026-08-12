@@ -22,7 +22,7 @@ def count_ref_like_reads(
 ) -> int:
     # For BNDs, only the local breakend can be assessed as REF-like in this BAM
     # pass. For local events, require reads spanning the whole candidate interval.
-    if event.event_type.startswith("NHEJ_BND"):
+    if event.event_type.startswith("BND_"):
         start = max(0, int(event.bkp_A_pos) - 1)
         end = int(event.bkp_A_pos) + 1
     else:
