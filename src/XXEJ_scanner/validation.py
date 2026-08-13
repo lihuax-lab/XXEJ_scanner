@@ -75,6 +75,11 @@ def second_pass_validate_event(
             config,
             padding=0,
             min_mapq=config.strict_min_mapq,
+            min_baseq=(
+                config.strict_min_breakpoint_baseq
+                if config.min_breakpoint_baseq > 0
+                else 0
+            ),
         )
         strict_support.update(
             matching_event_read_names(event, strict_evidence, config)

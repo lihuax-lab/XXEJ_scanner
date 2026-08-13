@@ -71,6 +71,10 @@ Optional:
 --control-name control
 --depth-count-method pileup
 --cluster-method window
+--breakpoint-quality-window 5
+--min-breakpoint-baseq 20
+--strict-min-breakpoint-baseq 25
+--min-breakpoint-quality-fraction 0.8
 --max-sa-nm 10
 --max-control-alt-support 1
 --microhomology-search-window 5
@@ -88,6 +92,10 @@ uv run --no-editable XXEJ_scanner scan \
   --reference-fasta ref/genome.fa \
   --output-dir results/XXEJ_scanner \
   --min-mapq 20 \
+  --breakpoint-quality-window 5 \
+  --min-breakpoint-baseq 20 \
+  --strict-min-breakpoint-baseq 25 \
+  --min-breakpoint-quality-fraction 0.8 \
   --min-clip-length 10 \
   --clip-cluster-window 20 \
   --cluster-method window \
@@ -170,7 +178,7 @@ Depth columns in `breakpoint_clusters.tsv` and `events.tsv` report local depth a
 
 Breakpoint clustering defaults to `--cluster-method window`, which groups soft-clipped read ends by genomic proximity only. The experimental `--cluster-method evidence-graph` mode builds a lightweight weighted graph over nearby clipped observations and uses deterministic community detection to link clips that are supported by local CIGAR indel, SA split-read, or discordant-pair evidence. It still emits the same `breakpoint_clusters.tsv` schema, so runs can be compared directly against the default window method.
 
-By default, discovery filters use mapped, primary, non-secondary alignments that pass MAPQ and aligned-length thresholds. Duplicate reads are excluded unless `--allow-duplicates` is set. Supplementary alignments are excluded unless `--include-supplementary` is set; SA tags on primary alignments are still parsed for split-read evidence.
+By default, discovery filters use mapped, primary, non-secondary alignments that pass MAPQ and aligned-length thresholds. Resolved soft-clip, CIGAR-indel, and SA-tag junctions must also have at least 80% of the ten query bases surrounding the breakpoint at Q20 or above; strict second-pass validation raises this to Q25. Missing base qualities and hard-clipped junctions cannot pass this check. Set `--min-breakpoint-baseq 0` to disable breakpoint base-quality filtering. Discordant-pair evidence is unaffected because it does not resolve an exact query breakpoint. Duplicate reads are excluded unless `--allow-duplicates` is set. Supplementary alignments are excluded unless `--include-supplementary` is set; SA tags on primary alignments are still parsed for split-read evidence.
 
 Candidate discovery always unions coverage/BED intervals with genome-wide strong structural evidence. Exact CIGAR indel alleles and bounded SA/discordant-pair clusters must meet their event support threshold; soft-clip-only evidence remains limited to coverage/BED intervals. This prevents low-coverage resolved junctions from being discarded while avoiding a genome-wide expansion driven only by clipping noise.
 

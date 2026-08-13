@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from math import ceil
 from typing import Iterable, Iterator
 
 import pysam
@@ -105,6 +106,31 @@ def passes_read_filters(
     return True
 
 
+def passes_breakpoint_quality(
+    read: object,
+    query_pos: int | None,
+    config: ScannerConfig,
+    *,
+    min_baseq: int | None = None,
+) -> bool:
+    """Check a query window centered on one resolved breakpoint boundary."""
+    threshold = config.min_breakpoint_baseq if min_baseq is None else min_baseq
+    if threshold <= 0:
+        return True
+    qualities = getattr(read, "query_qualities", None)
+    radius = config.breakpoint_quality_window
+    if (
+        query_pos is None
+        or qualities is None
+        or query_pos < radius
+        or query_pos + radius > len(qualities)
+    ):
+        return False
+    window = qualities[query_pos - radius : query_pos + radius]
+    required = ceil(len(window) * config.min_breakpoint_quality_fraction)
+    return sum(quality >= threshold for quality in window) >= required
+
+
 def clip_lengths(
     cigartuples: list[tuple[int, int]] | tuple[tuple[int, int], ...] | None,
 ) -> tuple[int, int, str, str]:
@@ -134,7 +160,12 @@ def is_strongly_clipped(read: object, min_clip_length: int) -> bool:
     return left >= min_clip_length or right >= min_clip_length
 
 
-def extract_clip_sites_from_read(read: object, config: ScannerConfig) -> list[ClipSite]:
+def extract_clip_sites_from_read(
+    read: object,
+    config: ScannerConfig,
+    *,
+    min_baseq: int | None = None,
+) -> list[ClipSite]:
     if not passes_read_filters(read, config):
         return []
 
@@ -148,7 +179,12 @@ def extract_clip_sites_from_read(read: object, config: ScannerConfig) -> list[Cl
     strand = "-" if getattr(read, "is_reverse", False) else "+"
     sites: list[ClipSite] = []
 
-    if left_len >= config.min_clip_length:
+    if left_len >= config.min_clip_length and passes_breakpoint_quality(
+        read,
+        left_len if left_type == "S" else None,
+        config,
+        min_baseq=min_baseq,
+    ):
         # Left soft clipping means the clipped bases occur before the aligned
         # portion of the query, so the candidate break lies at reference_start.
         sequence = (
@@ -172,7 +208,12 @@ def extract_clip_sites_from_read(read: object, config: ScannerConfig) -> list[Cl
             )
         )
 
-    if right_len >= config.min_clip_length:
+    if right_len >= config.min_clip_length and passes_breakpoint_quality(
+        read,
+        len(query_sequence) - right_len if right_type == "S" else None,
+        config,
+        min_baseq=min_baseq,
+    ):
         # Right soft clipping points to the reference end of the alignment. This
         # is a 0-based half-open end coordinate from pysam.
         sequence = (
@@ -202,7 +243,10 @@ def extract_clip_sites_from_read(read: object, config: ScannerConfig) -> list[Cl
 
 
 def extract_cigar_indels_from_read(
-    read: object, config: ScannerConfig
+    read: object,
+    config: ScannerConfig,
+    *,
+    min_baseq: int | None = None,
 ) -> list[CigarIndel]:
     if not passes_read_filters(read, config):
         return []
@@ -217,7 +261,12 @@ def extract_cigar_indels_from_read(
         # ref_pos and query_pos are advanced independently because insertions
         # consume query only, while deletions consume reference only.
         if op == CIGAR_INS:
-            if length >= config.min_indel_length:
+            if length >= config.min_indel_length and all(
+                passes_breakpoint_quality(
+                    read, boundary, config, min_baseq=min_baseq
+                )
+                for boundary in (query_pos, query_pos + length)
+            ):
                 sequence = (
                     query_sequence[query_pos : query_pos + length]
                     if query_sequence
@@ -237,7 +286,9 @@ def extract_cigar_indels_from_read(
                     )
                 )
         elif op == CIGAR_DEL:
-            if length >= config.min_indel_length:
+            if length >= config.min_indel_length and passes_breakpoint_quality(
+                read, query_pos, config, min_baseq=min_baseq
+            ):
                 indels.append(
                     CigarIndel(
                         chrom=chrom,
@@ -376,6 +427,7 @@ def extract_split_reads_from_sa_tag(
     config: ScannerConfig,
     *,
     min_mapq: int | None = None,
+    min_baseq: int | None = None,
 ) -> list[SplitReadEvidence]:
     if not passes_read_filters(read, config):
         return []
@@ -391,6 +443,9 @@ def extract_split_reads_from_sa_tag(
         int(getattr(read, "reference_start")),
         list(getattr(read, "cigartuples", None) or []),
         orientation_local,
+    )
+    left_clip, right_clip, left_type, right_type = clip_lengths(
+        getattr(read, "cigartuples", None)
     )
     splits: list[SplitReadEvidence] = []
 
@@ -426,6 +481,19 @@ def extract_split_reads_from_sa_tag(
         local_pos, side = _breakpoint_for_query_edge(
             local_geometry, orientation_local, local_edge
         )
+        query_boundary = (
+            left_clip
+            if side == "left_clip" and left_type == "S"
+            else (
+                len(getattr(read, "query_sequence", None) or "") - right_clip
+                if side == "right_clip" and right_type == "S"
+                else None
+            )
+        )
+        if not passes_breakpoint_quality(
+            read, query_boundary, config, min_baseq=min_baseq
+        ):
+            continue
         remote_pos, _remote_side = _breakpoint_for_query_edge(
             remote_geometry, remote_strand, remote_edge
         )
@@ -476,6 +544,7 @@ def collect_region_evidence(
     *,
     padding: int | None = None,
     min_mapq: int | None = None,
+    min_baseq: int | None = None,
 ) -> RegionEvidence:
     pad = config.scan_padding if padding is None else padding
     evidence = RegionEvidence(region=region)
@@ -492,14 +561,18 @@ def collect_region_evidence(
             config,
             min_mapq=min_mapq,
         ):
-            evidence.clip_sites.extend(extract_clip_sites_from_read(read, config))
-            evidence.indels.extend(extract_cigar_indels_from_read(read, config))
+            evidence.clip_sites.extend(
+                extract_clip_sites_from_read(read, config, min_baseq=min_baseq)
+            )
+            evidence.indels.extend(
+                extract_cigar_indels_from_read(read, config, min_baseq=min_baseq)
+            )
             discordant = extract_discordant_pair_from_read(read, config, region)
             if discordant and discordant.read_name not in seen_discordant:
                 evidence.discordant_pairs.append(discordant)
                 seen_discordant.add(discordant.read_name)
             for split in extract_split_reads_from_sa_tag(
-                read, config, min_mapq=min_mapq
+                read, config, min_mapq=min_mapq, min_baseq=min_baseq
             ):
                 key = (
                     split.read_name,
