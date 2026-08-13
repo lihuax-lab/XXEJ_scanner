@@ -373,7 +373,7 @@ def _deduplicate_bnd_events(
     """Collapse mirrored regional calls for the same unordered breakend pair."""
     def canonical_breakends(
         event: RepairEvent,
-    ) -> tuple[list[tuple[str, int]], str]:
+    ) -> tuple[tuple[tuple[str, int], tuple[str, int]], str]:
         endpoints = [
             (event.bkp_A_chrom, int(event.bkp_A_pos)),
             (event.bkp_B_chrom, int(event.bkp_B_pos)),
@@ -383,39 +383,76 @@ def _deduplicate_bnd_events(
             endpoints.reverse()
             if orientation != "NA" and len(orientation) == 2:
                 orientation = orientation[::-1]
-        return endpoints, orientation
+        return (endpoints[0], endpoints[1]), orientation
+
+    tolerance = max(1, window)
+
+    def bucket_key(
+        event_type: str,
+        endpoints: tuple[tuple[str, int], tuple[str, int]],
+    ) -> tuple[str, str, str, int, int]:
+        return (
+            event_type,
+            endpoints[0][0],
+            endpoints[1][0],
+            endpoints[0][1] // tolerance,
+            endpoints[1][1] // tolerance,
+        )
 
     kept: list[RepairEvent] = []
     aliases: dict[str, str] = {}
+    buckets: dict[tuple[str, str, str, int, int], set[int]] = {}
+    canonical: dict[
+        int, tuple[tuple[tuple[str, int], tuple[str, int]], str]
+    ] = {}
     for event in events:
         if event.event_type not in {"BND_INTRA", "BND_INTER"}:
             kept.append(event)
             continue
         endpoints, orientation = canonical_breakends(event)
-        matching = next(
-            (
-                candidate
-                for candidate in kept
-                if candidate.event_type == event.event_type
-                and (
-                    orientation == "NA"
-                    or canonical_breakends(candidate)[1] == "NA"
-                    or canonical_breakends(candidate)[1] == orientation
+        key = bucket_key(event.event_type, endpoints)
+        nearby = sorted(
+            {
+                index
+                for left_offset in (-1, 0, 1)
+                for right_offset in (-1, 0, 1)
+                for index in buckets.get(
+                    (
+                        key[0],
+                        key[1],
+                        key[2],
+                        key[3] + left_offset,
+                        key[4] + right_offset,
+                    ),
+                    (),
                 )
-                and all(
-                    left[0] == right[0]
-                    and abs(left[1] - right[1]) <= max(1, window)
-                    for left, right in zip(
-                        canonical_breakends(candidate)[0],
-                        endpoints,
+            }
+        )
+        matching_index = next(
+            (
+                index
+                for index in nearby
+                if (
+                    (
+                        orientation == "NA"
+                        or canonical[index][1] == "NA"
+                        or canonical[index][1] == orientation
+                    )
+                    and all(
+                        abs(left[1] - right[1]) <= tolerance
+                        for left, right in zip(canonical[index][0], endpoints)
                     )
                 )
             ),
             None,
         )
-        if matching is None:
+        if matching_index is None:
+            matching_index = len(kept)
             kept.append(event)
+            canonical[matching_index] = (endpoints, orientation)
+            buckets.setdefault(key, set()).add(matching_index)
             continue
+        matching = kept[matching_index]
         current_rank = (
             matching.filter == "PASS",
             matching.junction_resolved,
@@ -429,7 +466,13 @@ def _deduplicate_bnd_events(
             event.alt_support,
         )
         if new_rank > current_rank:
-            kept[kept.index(matching)] = event
+            old_key = bucket_key(matching.event_type, canonical[matching_index][0])
+            buckets[old_key].remove(matching_index)
+            if not buckets[old_key]:
+                del buckets[old_key]
+            kept[matching_index] = event
+            canonical[matching_index] = (endpoints, orientation)
+            buckets.setdefault(key, set()).add(matching_index)
             aliases[matching.event_id] = event.event_id
             event.support_read_names.update(matching.support_read_names)
         else:
@@ -437,8 +480,14 @@ def _deduplicate_bnd_events(
             matching.support_read_names.update(event.support_read_names)
 
     for row in evidence:
-        while row.event_id in aliases:
-            row.event_id = aliases[row.event_id]
+        path: list[str] = []
+        event_id = row.event_id
+        while event_id in aliases:
+            path.append(event_id)
+            event_id = aliases[event_id]
+        row.event_id = event_id
+        for alias in path:
+            aliases[alias] = event_id
     kept_ids = {event.event_id for event in kept}
     return kept, [row for row in evidence if row.event_id in kept_ids]
 
