@@ -68,6 +68,30 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--control-name", default="control")
     scan.add_argument("--min-mapq", type=int, default=20)
     scan.add_argument("--strict-min-mapq", type=int, default=30)
+    scan.add_argument(
+        "--breakpoint-quality-window",
+        type=int,
+        default=5,
+        help="Query bases to inspect on each side of a resolved breakpoint.",
+    )
+    scan.add_argument(
+        "--min-breakpoint-baseq",
+        type=int,
+        default=20,
+        help="Minimum base quality in discovery breakpoint windows; 0 disables filtering.",
+    )
+    scan.add_argument(
+        "--strict-min-breakpoint-baseq",
+        type=int,
+        default=25,
+        help="Minimum base quality used during strict second-pass validation.",
+    )
+    scan.add_argument(
+        "--min-breakpoint-quality-fraction",
+        type=float,
+        default=0.8,
+        help="Minimum fraction of breakpoint-window bases meeting the base-quality threshold.",
+    )
     scan.add_argument("--min-clip-length", type=int, default=10)
     scan.add_argument("--clip-cluster-window", type=int, default=20)
     scan.add_argument(
@@ -128,6 +152,10 @@ def _config_from_args(args: argparse.Namespace) -> ScannerConfig:
         control_name=args.control_name,
         min_mapq=args.min_mapq,
         strict_min_mapq=args.strict_min_mapq,
+        breakpoint_quality_window=args.breakpoint_quality_window,
+        min_breakpoint_baseq=args.min_breakpoint_baseq,
+        strict_min_breakpoint_baseq=args.strict_min_breakpoint_baseq,
+        min_breakpoint_quality_fraction=args.min_breakpoint_quality_fraction,
         min_clip_length=args.min_clip_length,
         clip_cluster_window=args.clip_cluster_window,
         cluster_method=args.cluster_method,
@@ -321,6 +349,10 @@ def run_scan(config: ScannerConfig) -> dict[str, object]:
         "candidate_regions": len(regions),
         "structural_candidate_regions": len(structural_regions),
         "cluster_method": config.cluster_method,
+        "breakpoint_quality_window": config.breakpoint_quality_window,
+        "min_breakpoint_baseq": config.min_breakpoint_baseq,
+        "strict_min_breakpoint_baseq": config.strict_min_breakpoint_baseq,
+        "min_breakpoint_quality_fraction": config.min_breakpoint_quality_fraction,
         "breakpoint_clusters": len(all_clusters),
         "events": len(all_events),
         "pass_events": sum(1 for event in all_events if event.filter == "PASS"),

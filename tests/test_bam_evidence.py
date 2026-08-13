@@ -8,6 +8,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from XXEJ_scanner.bam_evidence import (
+    extract_cigar_indels_from_read,
+    extract_clip_sites_from_read,
     extract_discordant_pair_from_read,
     extract_split_reads_from_sa_tag,
     is_discordant_pair,
@@ -45,7 +47,62 @@ def make_read(**overrides):
         "cigartuples": [(0, 50)],
     }
     values.update(overrides)
+    query_length = sum(
+        length for op, length in values["cigartuples"] if op in {0, 1, 4, 7, 8}
+    )
+    if "query_sequence" not in overrides:
+        values["query_sequence"] = "A" * query_length
+    if "query_qualities" not in overrides:
+        values["query_qualities"] = [40] * query_length
     return SimpleNamespace(**values)
+
+
+class BreakpointQualityTests(unittest.TestCase):
+    def test_soft_clip_requires_eighty_percent_q20(self):
+        qualities = [40] * 50
+        qualities[5:7] = [10, 10]
+        passing = make_read(cigartuples=[(4, 10), (0, 40)], query_qualities=qualities)
+
+        self.assertEqual(len(extract_clip_sites_from_read(passing, make_config())), 1)
+
+        qualities[7] = 10
+        failing = make_read(cigartuples=[(4, 10), (0, 40)], query_qualities=qualities)
+        self.assertEqual(extract_clip_sites_from_read(failing, make_config()), [])
+
+    def test_missing_qualities_and_hard_clips_fail_when_filtering_is_enabled(self):
+        missing = make_read(cigartuples=[(4, 10), (0, 40)], query_qualities=None)
+        hard_clipped = make_read(cigartuples=[(5, 10), (0, 40)])
+
+        self.assertEqual(extract_clip_sites_from_read(missing, make_config()), [])
+        self.assertEqual(extract_clip_sites_from_read(hard_clipped, make_config()), [])
+        self.assertEqual(
+            len(
+                extract_clip_sites_from_read(
+                    hard_clipped, make_config(min_breakpoint_baseq=0)
+                )
+            ),
+            1,
+        )
+
+    def test_indels_require_quality_at_each_resolved_boundary(self):
+        deletion = make_read(cigartuples=[(0, 20), (2, 5), (0, 20)])
+        insertion = make_read(cigartuples=[(0, 20), (1, 10), (0, 20)])
+
+        self.assertEqual(len(extract_cigar_indels_from_read(deletion, make_config())), 1)
+        self.assertEqual(len(extract_cigar_indels_from_read(insertion, make_config())), 1)
+
+        insertion.query_qualities[30:33] = [10, 10, 10]
+        self.assertEqual(extract_cigar_indels_from_read(insertion, make_config()), [])
+
+    def test_strict_baseq_override_is_used(self):
+        read = make_read(
+            cigartuples=[(4, 10), (0, 40)], query_qualities=[22] * 50
+        )
+
+        self.assertEqual(len(extract_clip_sites_from_read(read, make_config())), 1)
+        self.assertEqual(
+            extract_clip_sites_from_read(read, make_config(), min_baseq=25), []
+        )
 
 
 class DiscordantPairTests(unittest.TestCase):
@@ -131,6 +188,18 @@ class SplitReadTests(unittest.TestCase):
         )
 
         self.assertEqual(splits, [])
+
+    def test_sa_junction_requires_local_base_quality(self):
+        read = make_read(
+            is_paired=False,
+            reference_start=100,
+            cigartuples=[(0, 50), (4, 50)],
+            query_qualities=[40] * 45 + [10] * 10 + [40] * 45,
+            has_tag=lambda tag: tag == "SA",
+            get_tag=lambda tag: "chr2,501,+,50S50M,60,2;",
+        )
+
+        self.assertEqual(extract_split_reads_from_sa_tag(read, make_config()), [])
 
 
 if __name__ == "__main__":

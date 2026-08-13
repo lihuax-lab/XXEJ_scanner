@@ -29,6 +29,10 @@ class ScannerConfig:
     control_name: str = "control"
     min_mapq: int = 20
     strict_min_mapq: int = 30
+    breakpoint_quality_window: int = 5
+    min_breakpoint_baseq: int = 20
+    strict_min_breakpoint_baseq: int = 25
+    min_breakpoint_quality_fraction: float = 0.8
     min_clip_length: int = 10
     clip_cluster_window: int = 20
     cluster_method: ClusterMethod = "window"
