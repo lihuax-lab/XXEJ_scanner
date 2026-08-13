@@ -13,8 +13,14 @@ The pipeline keeps three concepts separate:
 This repository is a `uv` project. From the project root:
 
 ```bash
+brew install htslib pkg-config
 uv sync --no-editable
 ```
+
+When HTSlib is available, installation builds the optional C++ evidence
+extractor. `--evidence-backend auto` uses it by default and falls back to
+pysam if compilation is unavailable. Use `--evidence-backend python` to force
+the reference implementation when comparing results.
 
 Run the scanner through the installed console script:
 
@@ -69,6 +75,8 @@ Optional:
 --peak-bed peaks.bed
 --sample-name treated
 --control-name control
+--evidence-backend auto
+--evidence-batch-size 512
 --depth-count-method pileup
 --cluster-method window
 --breakpoint-quality-window 5

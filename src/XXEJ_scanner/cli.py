@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .bam_evidence import clip_site_count_near, collect_region_evidence, count_depth
+from .bam_evidence import clip_site_count_near, count_depth
 from .breakpoints import (
     cluster_evidence_graph,
     cluster_clip_sites,
@@ -40,6 +40,7 @@ from .models import (
     RepairEvent,
     ScannerConfig,
 )
+from .native_evidence import iter_region_evidence, selected_backend
 from .reference import ReferenceGenome
 from .utils import log, validate_inputs
 from .validation import (
@@ -68,6 +69,18 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--control-name", default="control")
     scan.add_argument("--min-mapq", type=int, default=20)
     scan.add_argument("--strict-min-mapq", type=int, default=30)
+    scan.add_argument(
+        "--evidence-backend",
+        choices=("auto", "native", "python"),
+        default="auto",
+        help="Evidence scanner backend; auto uses the HTSlib C++ extension when built.",
+    )
+    scan.add_argument(
+        "--evidence-batch-size",
+        type=int,
+        default=512,
+        help="Candidate regions handled per HTSlib invocation.",
+    )
     scan.add_argument(
         "--breakpoint-quality-window",
         type=int,
@@ -152,6 +165,8 @@ def _config_from_args(args: argparse.Namespace) -> ScannerConfig:
         control_name=args.control_name,
         min_mapq=args.min_mapq,
         strict_min_mapq=args.strict_min_mapq,
+        evidence_backend=args.evidence_backend,
+        evidence_batch_size=args.evidence_batch_size,
         breakpoint_quality_window=args.breakpoint_quality_window,
         min_breakpoint_baseq=args.min_breakpoint_baseq,
         strict_min_breakpoint_baseq=args.strict_min_breakpoint_baseq,
@@ -218,23 +233,24 @@ def run_scan(config: ScannerConfig) -> dict[str, object]:
 
     log("[3/6] Extracting clipped reads")
     with ReferenceGenome(config.reference_fasta) as reference:
-        for region in regions:
+        for region_index, (
+            region,
+            treated_evidence,
+            control_evidence,
+        ) in enumerate(iter_region_evidence(regions, config), 1):
+            if (
+                region_index == 1
+                or region_index % 1000 == 0
+                or region_index == len(regions)
+            ):
+                log(f"[3-5/6] Processing candidate region {region_index}/{len(regions)}")
             # Evidence is collected per candidate region to avoid assuming WGS-
             # like uniform coverage. Each region can have its own local depth,
             # control noise, and breakpoint structure.
-            treated_evidence = collect_region_evidence(
-                config.treated_bam, region, config
-            )
-            control_evidence = (
-                collect_region_evidence(config.control_bam, region, config)
-                if config.control_bam
-                else None
-            )
             raw_clip_sites.extend(treated_evidence.clip_sites)
             raw_discordant_pairs.extend(treated_evidence.discordant_pairs)
             raw_split_reads.extend(treated_evidence.split_reads)
 
-            log("[4/6] Clustering breakpoints")
             if config.cluster_method == "evidence-graph":
                 clusters = cluster_evidence_graph(
                     treated_evidence, config, region=region
@@ -287,7 +303,6 @@ def run_scan(config: ScannerConfig) -> dict[str, object]:
             )
             all_clusters.extend(kept_clusters)
 
-            log("[5/6] Classifying repair events")
             events, event_evidence = classify_local_events(
                 region, kept_clusters, treated_evidence, reference, config
             )
@@ -349,6 +364,8 @@ def run_scan(config: ScannerConfig) -> dict[str, object]:
         "candidate_regions": len(regions),
         "structural_candidate_regions": len(structural_regions),
         "cluster_method": config.cluster_method,
+        "evidence_backend": selected_backend(config),
+        "evidence_batch_size": config.evidence_batch_size,
         "breakpoint_quality_window": config.breakpoint_quality_window,
         "min_breakpoint_baseq": config.min_breakpoint_baseq,
         "strict_min_breakpoint_baseq": config.strict_min_breakpoint_baseq,

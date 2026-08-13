@@ -62,6 +62,8 @@ class ScannerConfig:
     microhomology_search_window: int = 5
     second_pass_window: int = 150
     depth_count_method: str = "pileup"
+    evidence_backend: str = "auto"
+    evidence_batch_size: int = 512
 
 
 @dataclass(slots=True)
