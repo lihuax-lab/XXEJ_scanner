@@ -169,6 +169,10 @@ def validate_inputs(config: ScannerConfig) -> None:
         )
     if not 0 < config.min_breakpoint_quality_fraction <= 1:
         raise ValueError("min_breakpoint_quality_fraction must be in (0, 1]")
+    if config.evidence_backend not in {"auto", "native", "python"}:
+        raise ValueError("evidence_backend must be auto, native, or python")
+    if config.evidence_batch_size < 1:
+        raise ValueError("evidence_batch_size must be at least 1")
     ensure_bam_index(config.treated_bam)
     if config.control_bam:
         ensure_bam_index(config.control_bam)

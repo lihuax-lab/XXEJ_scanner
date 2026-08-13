@@ -8,20 +8,17 @@ requires-python = ">=3.10"
 dependencies = [
     "pysam>=0.22.0",
 ]
-classifiers = [
-    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
-]
 
 [project.scripts]
 XXEJ_scanner = "XXEJ_scanner.cli:main"
 xxej-scanner = "XXEJ_scanner.cli:main"
 
 [build-system]
-requires = ["hatchling>=1.27"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/XXEJ_scanner"]
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.uv]
 package = true
