@@ -244,6 +244,36 @@ class StructuralDiscoveryTest(unittest.TestCase):
         self.assertEqual([event.event_id for event in events], ["right"])
         self.assertEqual(evidence, [])
 
+    def test_deduplicates_bnds_with_the_same_temporary_id(self) -> None:
+        event = _bnd_event(0)
+        duplicate = deepcopy(event)
+        evidence = [EventEvidence(event.event_id, "read", "split_read", "chr1", 1)]
+
+        events, evidence = _deduplicate_bnd_events(
+            [event, duplicate], evidence, 100
+        )
+
+        self.assertEqual([item.event_id for item in events], [event.event_id])
+        self.assertEqual([row.event_id for row in evidence], [event.event_id])
+
+    def test_rejects_cyclic_event_aliases(self) -> None:
+        low = _bnd_event(0)
+        low.event_id = "A"
+        low.support_read_names = {"r1"}
+        middle = deepcopy(low)
+        middle.event_id = "B"
+        middle.support_read_names.add("r2")
+        high = deepcopy(middle)
+        high.event_id = "A"
+        high.support_read_names.add("r3")
+
+        with self.assertRaisesRegex(ValueError, "Cyclic event ID alias"):
+            _deduplicate_bnd_events(
+                [low, middle, high],
+                [EventEvidence("A", "read", "split_read", "chr1", 1)],
+                100,
+            )
+
     def test_indexed_bnd_deduplication_matches_exhaustive_results(self) -> None:
         events = []
         for index in range(600):

@@ -14,11 +14,57 @@ from .models import (
     ClipSite,
     DiscordantPair,
     EventEvidence,
+    RegionEvidence,
     RepairEvent,
     ScannerConfig,
     SplitReadEvidence,
 )
 from .utils import format_float, safe_mkdir
+
+RAW_CLIP_FIELDS = [
+    "chrom",
+    "pos",
+    "side",
+    "clip_length",
+    "clip_sequence",
+    "read_name",
+    "strand",
+    "mapq",
+    "cigar",
+    "is_reverse",
+    "reference_start",
+    "reference_end",
+    "clip_type",
+]
+RAW_DISCORDANT_PAIR_FIELDS = [
+    "read_name",
+    "chrom",
+    "pos",
+    "mate_chrom",
+    "mate_pos",
+    "orientation",
+    "mapq",
+    "is_reverse",
+    "mate_is_reverse",
+    "cigar",
+    "reason",
+]
+RAW_SPLIT_READ_FIELDS = [
+    "read_name",
+    "chrom",
+    "pos",
+    "side",
+    "remote_chrom",
+    "remote_pos",
+    "remote_strand",
+    "remote_cigar",
+    "remote_mapq",
+    "remote_nm",
+    "orientation",
+    "mapq",
+    "cigar",
+    "sa_tag",
+]
 
 
 def _value(value: object) -> str:
@@ -162,59 +208,15 @@ def write_event_evidence_tsv(path: str, evidence: Iterable[EventEvidence]) -> No
 
 
 def write_raw_clip_sites_tsv(path: str, sites: Iterable[ClipSite]) -> None:
-    fields = [
-        "chrom",
-        "pos",
-        "side",
-        "clip_length",
-        "clip_sequence",
-        "read_name",
-        "strand",
-        "mapq",
-        "cigar",
-        "is_reverse",
-        "reference_start",
-        "reference_end",
-        "clip_type",
-    ]
-    _write_dataclass_tsv(path, fields, sites)
+    _write_dataclass_tsv(path, RAW_CLIP_FIELDS, sites)
 
 
 def write_raw_discordant_pairs_tsv(path: str, pairs: Iterable[DiscordantPair]) -> None:
-    fields = [
-        "read_name",
-        "chrom",
-        "pos",
-        "mate_chrom",
-        "mate_pos",
-        "orientation",
-        "mapq",
-        "is_reverse",
-        "mate_is_reverse",
-        "cigar",
-        "reason",
-    ]
-    _write_dataclass_tsv(path, fields, pairs)
+    _write_dataclass_tsv(path, RAW_DISCORDANT_PAIR_FIELDS, pairs)
 
 
 def write_raw_split_reads_tsv(path: str, splits: Iterable[SplitReadEvidence]) -> None:
-    fields = [
-        "read_name",
-        "chrom",
-        "pos",
-        "side",
-        "remote_chrom",
-        "remote_pos",
-        "remote_strand",
-        "remote_cigar",
-        "remote_mapq",
-        "remote_nm",
-        "orientation",
-        "mapq",
-        "cigar",
-        "sa_tag",
-    ]
-    _write_dataclass_tsv(path, fields, splits)
+    _write_dataclass_tsv(path, RAW_SPLIT_READ_FIELDS, splits)
 
 
 def write_igv_loci_bed(
@@ -249,15 +251,41 @@ def write_run_summary_json(path: str, summary: dict[str, object]) -> None:
         handle.write("\n")
 
 
+class _DataclassTsvWriter:
+    def __init__(self, path: str, fields: list[str]) -> None:
+        self.path = path
+        self.fields = fields
+        self.handle = None
+        self.writer = None
+
+    def open(self) -> None:
+        self.handle = Path(self.path).open("w", newline="")
+        self.writer = csv.writer(self.handle, delimiter="\t", lineterminator="\n")
+        self.writer.writerow(self.fields)
+
+    def write(self, rows: Iterable[object]) -> None:
+        assert self.writer is not None
+        for row in rows:
+            values = asdict(row)
+            self.writer.writerow([_value(values.get(field)) for field in self.fields])
+
+    def close(self) -> None:
+        if self.handle is not None:
+            self.handle.close()
+
+    def __enter__(self) -> "_DataclassTsvWriter":
+        self.open()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+
 def _write_dataclass_tsv(path: str, fields: list[str], rows: Iterable[object]) -> None:
     # Shared TSV writer keeps column order explicit at each call site while still
     # using dataclass serialization for the row values.
-    with Path(path).open("w", newline="") as handle:
-        writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
-        writer.writerow(fields)
-        for row in rows:
-            values = asdict(row)
-            writer.writerow([_value(values.get(field)) for field in fields])
+    with _DataclassTsvWriter(path, fields) as writer:
+        writer.write(rows)
 
 
 def prepare_output_dir(output_dir: str) -> dict[str, str]:
@@ -276,3 +304,28 @@ def prepare_output_dir(output_dir: str) -> dict[str, str]:
         "igv_loci": "igv_loci.bed",
     }
     return {key: str(Path(output_dir) / name) for key, name in files.items()}
+
+
+class RawEvidenceWriter:
+    """Write raw evidence incrementally so large scans do not retain every row."""
+
+    def __init__(self, clip_path: str, pair_path: str, split_path: str) -> None:
+        self._writers = (
+            _DataclassTsvWriter(clip_path, RAW_CLIP_FIELDS),
+            _DataclassTsvWriter(pair_path, RAW_DISCORDANT_PAIR_FIELDS),
+            _DataclassTsvWriter(split_path, RAW_SPLIT_READ_FIELDS),
+        )
+
+    def __enter__(self) -> "RawEvidenceWriter":
+        for writer in self._writers:
+            writer.open()
+        return self
+
+    def write(self, evidence: RegionEvidence) -> None:
+        self._writers[0].write(evidence.clip_sites)
+        self._writers[1].write(evidence.discordant_pairs)
+        self._writers[2].write(evidence.split_reads)
+
+    def __exit__(self, *_exc: object) -> None:
+        for writer in self._writers:
+            writer.close()
