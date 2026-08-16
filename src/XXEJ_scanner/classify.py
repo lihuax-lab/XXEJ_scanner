@@ -239,7 +239,7 @@ def classify_bnd_events(
             )
             temp_event_id = (
                 f"TMP_BND_{region.region_id}_{cluster.chrom}_{cluster.peak_pos}_"
-                f"{remote_chrom}_{remote_pos}"
+                f"{remote_chrom}_{remote_pos}_{len(events) + 1}"
             )
             event = RepairEvent(
                 event_id=temp_event_id,
@@ -323,7 +323,7 @@ def _classify_pair_only_bnd_events(
         )
         temp_event_id = (
             f"TMP_BND_PAIRONLY_{region.region_id}_{local_chrom}_{local_pos}_"
-            f"{remote_chrom}_{remote_pos}"
+            f"{remote_chrom}_{remote_pos}_{len(events) + 1}"
         )
         event = RepairEvent(
             event_id=temp_event_id,

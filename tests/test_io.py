@@ -7,8 +7,21 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from XXEJ_scanner.io import write_events_tsv
-from XXEJ_scanner.models import RepairEvent
+from XXEJ_scanner.io import (
+    RawEvidenceWriter,
+    write_events_tsv,
+    write_raw_clip_sites_tsv,
+    write_raw_discordant_pairs_tsv,
+    write_raw_split_reads_tsv,
+)
+from XXEJ_scanner.models import (
+    CandidateRegion,
+    ClipSite,
+    DiscordantPair,
+    RegionEvidence,
+    RepairEvent,
+    SplitReadEvidence,
+)
 
 
 class EventsTsvTest(unittest.TestCase):
@@ -54,6 +67,47 @@ class EventsTsvTest(unittest.TestCase):
             "evidence_level",
             "junction_resolved",
         ])
+
+    def test_streamed_raw_evidence_matches_batch_writers(self) -> None:
+        evidence = RegionEvidence(
+            region=CandidateRegion("chr1", 10, 20, "region-1"),
+            clip_sites=[
+                ClipSite(
+                    "chr1", 10, "left_clip", 5, "AAAAA", "read-1", "+", 60,
+                    "5S45M", False, 10, 55,
+                )
+            ],
+            discordant_pairs=[
+                DiscordantPair(
+                    "read-2", "chr1", 12, "chr2", 30, "+-", 50, False,
+                    True, "50M", "different_chrom",
+                )
+            ],
+            split_reads=[
+                SplitReadEvidence(
+                    "read-3", "chr1", 15, "right_clip", "chr2", 40, "+",
+                    "10S40M", 55, 1, "++", 60, "40M10S",
+                    "chr2,41,+,10S40M,55,1;",
+                )
+            ],
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            expected = [root / f"expected-{index}.tsv" for index in range(3)]
+            actual = [root / f"actual-{index}.tsv" for index in range(3)]
+            write_raw_clip_sites_tsv(str(expected[0]), evidence.clip_sites)
+            write_raw_discordant_pairs_tsv(
+                str(expected[1]), evidence.discordant_pairs
+            )
+            write_raw_split_reads_tsv(str(expected[2]), evidence.split_reads)
+            with RawEvidenceWriter(*(str(path) for path in actual)) as writer:
+                writer.write(evidence)
+
+            self.assertEqual(
+                [path.read_bytes() for path in actual],
+                [path.read_bytes() for path in expected],
+            )
 
 
 if __name__ == "__main__":

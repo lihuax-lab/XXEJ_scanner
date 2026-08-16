@@ -22,15 +22,13 @@ from .coverage import (
 )
 from .genotype import count_ref_like_breakends, update_event_fraction
 from .io import (
+    RawEvidenceWriter,
     prepare_output_dir,
     write_breakpoint_clusters_tsv,
     write_candidate_regions_bed,
     write_event_evidence_tsv,
     write_events_tsv,
     write_igv_loci_bed,
-    write_raw_clip_sites_tsv,
-    write_raw_discordant_pairs_tsv,
-    write_raw_split_reads_tsv,
     write_run_summary_json,
 )
 from .models import (
@@ -227,12 +225,15 @@ def run_scan(config: ScannerConfig) -> dict[str, object]:
     all_clusters: list[BreakpointCluster] = []
     all_events: list[RepairEvent] = []
     all_event_evidence: list[EventEvidence] = []
-    raw_clip_sites = []
-    raw_discordant_pairs = []
-    raw_split_reads = []
-
     log("[3/6] Extracting clipped reads")
-    with ReferenceGenome(config.reference_fasta) as reference:
+    with (
+        ReferenceGenome(config.reference_fasta) as reference,
+        RawEvidenceWriter(
+            output_paths["raw_clip_sites"],
+            output_paths["raw_discordant_pairs"],
+            output_paths["raw_split_reads"],
+        ) as raw_writer,
+    ):
         for region_index, (
             region,
             treated_evidence,
@@ -247,9 +248,7 @@ def run_scan(config: ScannerConfig) -> dict[str, object]:
             # Evidence is collected per candidate region to avoid assuming WGS-
             # like uniform coverage. Each region can have its own local depth,
             # control noise, and breakpoint structure.
-            raw_clip_sites.extend(treated_evidence.clip_sites)
-            raw_discordant_pairs.extend(treated_evidence.discordant_pairs)
-            raw_split_reads.extend(treated_evidence.split_reads)
+            raw_writer.write(treated_evidence)
 
             if config.cluster_method == "evidence-graph":
                 clusters = cluster_evidence_graph(
@@ -339,6 +338,7 @@ def run_scan(config: ScannerConfig) -> dict[str, object]:
                 all_events.append(event)
             all_event_evidence.extend(event_evidence)
 
+    log(f"[5/6] Deduplicating {len(all_events)} repair events")
     all_events, all_event_evidence = _deduplicate_bnd_events(
         all_events, all_event_evidence, config.coverage_bin_size
     )
@@ -349,11 +349,6 @@ def run_scan(config: ScannerConfig) -> dict[str, object]:
     write_breakpoint_clusters_tsv(output_paths["breakpoint_clusters"], all_clusters)
     write_events_tsv(output_paths["events"], all_events)
     write_event_evidence_tsv(output_paths["event_evidence"], all_event_evidence)
-    write_raw_clip_sites_tsv(output_paths["raw_clip_sites"], raw_clip_sites)
-    write_raw_discordant_pairs_tsv(
-        output_paths["raw_discordant_pairs"], raw_discordant_pairs
-    )
-    write_raw_split_reads_tsv(output_paths["raw_split_reads"], raw_split_reads)
     write_igv_loci_bed(output_paths["igv_loci"], all_events)
     summary = {
         "sample_name": config.sample_name,
@@ -490,16 +485,20 @@ def _deduplicate_bnd_events(
             kept[matching_index] = event
             canonical[matching_index] = (endpoints, orientation)
             buckets.setdefault(key, set()).add(matching_index)
-            aliases[matching.event_id] = event.event_id
+            if matching.event_id != event.event_id:
+                aliases[matching.event_id] = event.event_id
             event.support_read_names.update(matching.support_read_names)
         else:
-            aliases[event.event_id] = matching.event_id
+            if event.event_id != matching.event_id:
+                aliases[event.event_id] = matching.event_id
             matching.support_read_names.update(event.support_read_names)
 
     for row in evidence:
         path: list[str] = []
         event_id = row.event_id
         while event_id in aliases:
+            if event_id in path:
+                raise ValueError(f"Cyclic event ID alias detected: {event_id}")
             path.append(event_id)
             event_id = aliases[event_id]
         row.event_id = event_id
