@@ -5,8 +5,9 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .bam_evidence import clip_site_count_near, collect_region_evidence, count_depth
+from .bam_evidence import clip_site_count_near, count_depth
 from .breakpoints import (
+    cluster_evidence_graph,
     cluster_clip_sites,
     filter_breakpoint_clusters,
     score_breakpoint_cluster,
@@ -15,19 +16,19 @@ from .classify import assign_final_event_ids, classify_local_events
 from .coverage import (
     annotate_region_coverage,
     call_candidate_regions,
+    call_structural_evidence_regions,
+    merge_candidate_bins,
     parse_bed_regions,
 )
-from .genotype import count_ref_like_reads, update_event_fraction
+from .genotype import count_ref_like_breakends, update_event_fraction
 from .io import (
+    RawEvidenceWriter,
     prepare_output_dir,
     write_breakpoint_clusters_tsv,
     write_candidate_regions_bed,
     write_event_evidence_tsv,
     write_events_tsv,
     write_igv_loci_bed,
-    write_raw_clip_sites_tsv,
-    write_raw_discordant_pairs_tsv,
-    write_raw_split_reads_tsv,
     write_run_summary_json,
 )
 from .models import (
@@ -37,9 +38,14 @@ from .models import (
     RepairEvent,
     ScannerConfig,
 )
+from .native_evidence import iter_region_evidence, selected_backend
 from .reference import ReferenceGenome
 from .utils import log, validate_inputs
-from .validation import assign_event_filter, second_pass_validate_event
+from .validation import (
+    assign_event_filter,
+    matching_event_read_names,
+    second_pass_validate_event,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -57,18 +63,71 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--output-dir", required=True)
     scan.add_argument("--candidate-bed", default=None)
     scan.add_argument("--peak-bed", default=None)
+    scan.add_argument(
+        "--skip-chrm",
+        action="store_true",
+        help="Exclude chrM candidate regions from evidence extraction and output.",
+    )
     scan.add_argument("--sample-name", default="treated")
     scan.add_argument("--control-name", default="control")
     scan.add_argument("--min-mapq", type=int, default=20)
     scan.add_argument("--strict-min-mapq", type=int, default=30)
+    scan.add_argument(
+        "--evidence-backend",
+        choices=("auto", "native", "python"),
+        default="auto",
+        help="Evidence scanner backend; auto uses the HTSlib C++ extension when built.",
+    )
+    scan.add_argument(
+        "--evidence-batch-size",
+        type=int,
+        default=512,
+        help="Candidate regions handled per HTSlib invocation.",
+    )
+    scan.add_argument(
+        "--breakpoint-quality-window",
+        type=int,
+        default=5,
+        help="Query bases to inspect on each side of a resolved breakpoint.",
+    )
+    scan.add_argument(
+        "--min-breakpoint-baseq",
+        type=int,
+        default=20,
+        help="Minimum base quality in discovery breakpoint windows; 0 disables filtering.",
+    )
+    scan.add_argument(
+        "--strict-min-breakpoint-baseq",
+        type=int,
+        default=25,
+        help="Minimum base quality used during strict second-pass validation.",
+    )
+    scan.add_argument(
+        "--min-breakpoint-quality-fraction",
+        type=float,
+        default=0.8,
+        help="Minimum fraction of breakpoint-window bases meeting the base-quality threshold.",
+    )
     scan.add_argument("--min-clip-length", type=int, default=10)
     scan.add_argument("--clip-cluster-window", type=int, default=20)
+    scan.add_argument(
+        "--cluster-method",
+        choices=["window", "evidence-graph"],
+        default="window",
+        help=(
+            "Breakpoint clustering method. 'window' uses proximity-only soft "
+            "clip clusters; 'evidence-graph' uses lightweight graph community "
+            "detection to link nearby clipped observations supported by local "
+            "indel, split-read, or discordant-pair evidence."
+        ),
+    )
     scan.add_argument("--coverage-bin-size", type=int, default=100)
     scan.add_argument("--merge-distance", type=int, default=300)
     scan.add_argument("--max-normal-clip-rate", type=float, default=0.05)
+    scan.add_argument("--max-control-alt-support", type=int, default=1)
     scan.add_argument("--min-alt-support", type=int, default=3)
     scan.add_argument("--min-bnd-support", type=int, default=3)
-    scan.add_argument("--min-treated-coverage", type=float, default=5.0)
+    scan.add_argument("--min-treated-coverage", type=float, default=None)
     scan.add_argument("--min-log2fc", type=float, default=1.0)
     scan.add_argument("--top-percentile", type=float, default=95.0)
     scan.add_argument("--pseudo-count", type=float, default=1.0)
@@ -80,12 +139,11 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--allow-duplicates", action="store_true")
     scan.add_argument("--include-supplementary", action="store_true")
     scan.add_argument("--min-aligned-length", type=int, default=20)
+    scan.add_argument("--max-sa-nm", type=int, default=10)
     scan.add_argument("--scan-padding", type=int, default=200)
     scan.add_argument("--max-local-event-distance", type=int, default=10000)
     scan.add_argument("--max-insertion-length", type=int, default=50)
     scan.add_argument("--min-indel-length", type=int, default=1)
-    scan.add_argument("--min-nhej-ins-indel-support", type=int, default=1)
-    scan.add_argument("--allow-clip-only-nhej-ins", action="store_true")
     scan.add_argument("--min-microhomology-length", type=int, default=1)
     scan.add_argument("--max-microhomology-length", type=int, default=20)
     scan.add_argument("--microhomology-search-window", type=int, default=5)
@@ -106,15 +164,24 @@ def _config_from_args(args: argparse.Namespace) -> ScannerConfig:
         output_dir=args.output_dir,
         candidate_bed=args.candidate_bed,
         peak_bed=args.peak_bed,
+        skip_chrm=args.skip_chrm,
         sample_name=args.sample_name,
         control_name=args.control_name,
         min_mapq=args.min_mapq,
         strict_min_mapq=args.strict_min_mapq,
+        evidence_backend=args.evidence_backend,
+        evidence_batch_size=args.evidence_batch_size,
+        breakpoint_quality_window=args.breakpoint_quality_window,
+        min_breakpoint_baseq=args.min_breakpoint_baseq,
+        strict_min_breakpoint_baseq=args.strict_min_breakpoint_baseq,
+        min_breakpoint_quality_fraction=args.min_breakpoint_quality_fraction,
         min_clip_length=args.min_clip_length,
         clip_cluster_window=args.clip_cluster_window,
+        cluster_method=args.cluster_method,
         coverage_bin_size=args.coverage_bin_size,
         merge_distance=args.merge_distance,
         max_normal_clip_rate=args.max_normal_clip_rate,
+        max_control_alt_support=args.max_control_alt_support,
         min_alt_support=args.min_alt_support,
         min_bnd_support=args.min_bnd_support,
         min_treated_coverage=args.min_treated_coverage,
@@ -127,12 +194,11 @@ def _config_from_args(args: argparse.Namespace) -> ScannerConfig:
         allow_duplicates=args.allow_duplicates,
         include_supplementary=args.include_supplementary,
         min_aligned_length=args.min_aligned_length,
+        max_sa_nm=args.max_sa_nm,
         scan_padding=args.scan_padding,
         max_local_event_distance=args.max_local_event_distance,
         max_insertion_length=args.max_insertion_length,
         min_indel_length=args.min_indel_length,
-        min_nhej_ins_indel_support=args.min_nhej_ins_indel_support,
-        allow_clip_only_nhej_ins=args.allow_clip_only_nhej_ins,
         min_microhomology_length=args.min_microhomology_length,
         max_microhomology_length=args.max_microhomology_length,
         microhomology_search_window=args.microhomology_search_window,
@@ -146,7 +212,7 @@ def run_scan(config: ScannerConfig) -> dict[str, object]:
     validate_inputs(config)
     output_paths = prepare_output_dir(config.output_dir)
 
-    log("[2/6] Calling candidate regions")
+    log("[2/6] Calling coverage and structural-evidence candidate regions")
     # BED input is treated as a search-space hint, not as a called repair event.
     # Coverage statistics are still annotated so candidate_regions.bed remains
     # comparable between BED-driven and de novo scans.
@@ -154,41 +220,52 @@ def run_scan(config: ScannerConfig) -> dict[str, object]:
         input_bed = config.candidate_bed or config.peak_bed
         assert input_bed is not None
         regions = parse_bed_regions(input_bed)
-        regions = annotate_region_coverage(
-            regions, config.treated_bam, config, config.control_bam
-        )
     else:
         regions = call_candidate_regions(config.treated_bam, config, config.control_bam)
+    structural_regions = call_structural_evidence_regions(config.treated_bam, config)
+    regions = merge_candidate_bins([*regions, *structural_regions], 0)
+    if config.skip_chrm:
+        regions = [region for region in regions if region.chrom != "chrM"]
+    regions = annotate_region_coverage(
+        regions, config.treated_bam, config, config.control_bam
+    )
 
     all_clusters: list[BreakpointCluster] = []
     all_events: list[RepairEvent] = []
     all_event_evidence: list[EventEvidence] = []
-    raw_clip_sites = []
-    raw_discordant_pairs = []
-    raw_split_reads = []
-
     log("[3/6] Extracting clipped reads")
-    with ReferenceGenome(config.reference_fasta) as reference:
-        for region in regions:
+    with (
+        ReferenceGenome(config.reference_fasta) as reference,
+        RawEvidenceWriter(
+            output_paths["raw_clip_sites"],
+            output_paths["raw_discordant_pairs"],
+            output_paths["raw_split_reads"],
+        ) as raw_writer,
+    ):
+        for region_index, (
+            region,
+            treated_evidence,
+            control_evidence,
+        ) in enumerate(iter_region_evidence(regions, config), 1):
+            if (
+                region_index == 1
+                or region_index % 1000 == 0
+                or region_index == len(regions)
+            ):
+                log(f"[3-5/6] Processing candidate region {region_index}/{len(regions)}")
             # Evidence is collected per candidate region to avoid assuming WGS-
             # like uniform coverage. Each region can have its own local depth,
             # control noise, and breakpoint structure.
-            treated_evidence = collect_region_evidence(
-                config.treated_bam, region, config
-            )
-            control_evidence = (
-                collect_region_evidence(config.control_bam, region, config)
-                if config.control_bam
-                else None
-            )
-            raw_clip_sites.extend(treated_evidence.clip_sites)
-            raw_discordant_pairs.extend(treated_evidence.discordant_pairs)
-            raw_split_reads.extend(treated_evidence.split_reads)
+            raw_writer.write(treated_evidence)
 
-            log("[4/6] Clustering breakpoints")
-            clusters = cluster_clip_sites(
-                treated_evidence.clip_sites, config, region=region
-            )
+            if config.cluster_method == "evidence-graph":
+                clusters = cluster_evidence_graph(
+                    treated_evidence, config, region=region
+                )
+            else:
+                clusters = cluster_clip_sites(
+                    treated_evidence.clip_sites, config, region=region
+                )
             for cluster in clusters:
                 # Depth is counted around the cluster, not across the whole
                 # enriched region, because CUT&Tag peaks can be highly uneven.
@@ -233,7 +310,6 @@ def run_scan(config: ScannerConfig) -> dict[str, object]:
             )
             all_clusters.extend(kept_clusters)
 
-            log("[5/6] Classifying repair events")
             events, event_evidence = classify_local_events(
                 region, kept_clusters, treated_evidence, reference, config
             )
@@ -242,18 +318,26 @@ def run_scan(config: ScannerConfig) -> dict[str, object]:
                 # classification: event evidence asks "is there abnormal
                 # structure?", while ref_spanning_support asks "how much intact
                 # local sequence is still visible around this breakpoint?".
-                event.ref_spanning_support = count_ref_like_reads(
+                event.ref_support_A, event.ref_support_B = count_ref_like_breakends(
                     config.treated_bam, event, config
                 )
+                event.ref_spanning_support = _combined_ref_support(event)
                 if config.control_bam:
-                    event.control_ref_support = count_ref_like_reads(
+                    (
+                        event.control_ref_support_A,
+                        event.control_ref_support_B,
+                    ) = count_ref_like_breakends(
                         config.control_bam, event, config
                     )
+                    event.control_ref_support = _combined_ref_support(
+                        event, control=True
+                    )
                     event.control_alt_support = (
-                        _control_alt_support(event, control_evidence, config)
+                        len(matching_event_read_names(event, control_evidence, config))
                         if control_evidence
                         else 0
                     )
+                    event.control_assessed = True
                 update_event_fraction(event)
                 event.filter = assign_event_filter(event, config)
                 # The second pass re-queries a narrower interval with stricter
@@ -262,6 +346,10 @@ def run_scan(config: ScannerConfig) -> dict[str, object]:
                 all_events.append(event)
             all_event_evidence.extend(event_evidence)
 
+    log(f"[5/6] Deduplicating {len(all_events)} repair events")
+    all_events, all_event_evidence = _deduplicate_bnd_events(
+        all_events, all_event_evidence, config.coverage_bin_size
+    )
     assign_final_event_ids(all_events, all_event_evidence)
 
     log("[6/6] Writing outputs")
@@ -269,11 +357,6 @@ def run_scan(config: ScannerConfig) -> dict[str, object]:
     write_breakpoint_clusters_tsv(output_paths["breakpoint_clusters"], all_clusters)
     write_events_tsv(output_paths["events"], all_events)
     write_event_evidence_tsv(output_paths["event_evidence"], all_event_evidence)
-    write_raw_clip_sites_tsv(output_paths["raw_clip_sites"], raw_clip_sites)
-    write_raw_discordant_pairs_tsv(
-        output_paths["raw_discordant_pairs"], raw_discordant_pairs
-    )
-    write_raw_split_reads_tsv(output_paths["raw_split_reads"], raw_split_reads)
     write_igv_loci_bed(output_paths["igv_loci"], all_events)
     summary = {
         "sample_name": config.sample_name,
@@ -281,7 +364,16 @@ def run_scan(config: ScannerConfig) -> dict[str, object]:
         "treated_bam": str(Path(config.treated_bam)),
         "control_bam": str(Path(config.control_bam)) if config.control_bam else None,
         "reference_fasta": str(Path(config.reference_fasta)),
+        "skip_chrm": config.skip_chrm,
         "candidate_regions": len(regions),
+        "structural_candidate_regions": len(structural_regions),
+        "cluster_method": config.cluster_method,
+        "evidence_backend": selected_backend(config),
+        "evidence_batch_size": config.evidence_batch_size,
+        "breakpoint_quality_window": config.breakpoint_quality_window,
+        "min_breakpoint_baseq": config.min_breakpoint_baseq,
+        "strict_min_breakpoint_baseq": config.strict_min_breakpoint_baseq,
+        "min_breakpoint_quality_fraction": config.min_breakpoint_quality_fraction,
         "breakpoint_clusters": len(all_clusters),
         "events": len(all_events),
         "pass_events": sum(1 for event in all_events if event.filter == "PASS"),
@@ -294,40 +386,142 @@ def run_scan(config: ScannerConfig) -> dict[str, object]:
     return summary
 
 
-def _control_alt_support(
-    event: RepairEvent, control_evidence: object, config: ScannerConfig
-) -> int:
-    # Mirror the treated ALT-like evidence definition in the control sample so
-    # recurrent mapping artifacts can be downweighted in filters and summaries.
-    support = set()
-    for site in control_evidence.clip_sites:
-        if (
-            site.chrom == event.chrom
-            and abs(site.pos - int(event.bkp_A_pos)) <= config.clip_cluster_window
-        ):
-            support.add(site.read_name)
-    for indel in control_evidence.indels:
-        if (
-            indel.chrom == event.chrom
-            and int(event.start) - config.clip_cluster_window
-            <= indel.start
-            <= int(event.end) + config.clip_cluster_window
-        ):
-            support.add(indel.read_name)
-    if event.event_type.startswith("NHEJ_BND"):
-        for pair in control_evidence.discordant_pairs:
-            if (
-                pair.chrom == event.chrom
-                and abs(pair.pos - int(event.bkp_A_pos)) <= config.clip_cluster_window
-            ):
-                support.add(pair.read_name)
-        for split in control_evidence.split_reads:
-            if (
-                split.chrom == event.chrom
-                and abs(split.pos - int(event.bkp_A_pos)) <= config.clip_cluster_window
-            ):
-                support.add(split.read_name)
-    return len(support)
+def _deduplicate_bnd_events(
+    events: list[RepairEvent],
+    evidence: list[EventEvidence],
+    window: int,
+) -> tuple[list[RepairEvent], list[EventEvidence]]:
+    """Collapse mirrored regional calls for the same unordered breakend pair."""
+    def canonical_breakends(
+        event: RepairEvent,
+    ) -> tuple[tuple[tuple[str, int], tuple[str, int]], str]:
+        endpoints = [
+            (event.bkp_A_chrom, int(event.bkp_A_pos)),
+            (event.bkp_B_chrom, int(event.bkp_B_pos)),
+        ]
+        orientation = event.orientation
+        if endpoints[1] < endpoints[0]:
+            endpoints.reverse()
+            if orientation != "NA" and len(orientation) == 2:
+                orientation = orientation[::-1]
+        return (endpoints[0], endpoints[1]), orientation
+
+    tolerance = max(1, window)
+
+    def bucket_key(
+        event_type: str,
+        endpoints: tuple[tuple[str, int], tuple[str, int]],
+    ) -> tuple[str, str, str, int, int]:
+        return (
+            event_type,
+            endpoints[0][0],
+            endpoints[1][0],
+            endpoints[0][1] // tolerance,
+            endpoints[1][1] // tolerance,
+        )
+
+    kept: list[RepairEvent] = []
+    aliases: dict[str, str] = {}
+    buckets: dict[tuple[str, str, str, int, int], set[int]] = {}
+    canonical: dict[
+        int, tuple[tuple[tuple[str, int], tuple[str, int]], str]
+    ] = {}
+    for event in events:
+        if event.event_type not in {"BND_INTRA", "BND_INTER"}:
+            kept.append(event)
+            continue
+        endpoints, orientation = canonical_breakends(event)
+        key = bucket_key(event.event_type, endpoints)
+        nearby = sorted(
+            {
+                index
+                for left_offset in (-1, 0, 1)
+                for right_offset in (-1, 0, 1)
+                for index in buckets.get(
+                    (
+                        key[0],
+                        key[1],
+                        key[2],
+                        key[3] + left_offset,
+                        key[4] + right_offset,
+                    ),
+                    (),
+                )
+            }
+        )
+        matching_index = next(
+            (
+                index
+                for index in nearby
+                if (
+                    (
+                        orientation == "NA"
+                        or canonical[index][1] == "NA"
+                        or canonical[index][1] == orientation
+                    )
+                    and all(
+                        abs(left[1] - right[1]) <= tolerance
+                        for left, right in zip(canonical[index][0], endpoints)
+                    )
+                )
+            ),
+            None,
+        )
+        if matching_index is None:
+            matching_index = len(kept)
+            kept.append(event)
+            canonical[matching_index] = (endpoints, orientation)
+            buckets.setdefault(key, set()).add(matching_index)
+            continue
+        matching = kept[matching_index]
+        current_rank = (
+            matching.filter == "PASS",
+            matching.junction_resolved,
+            matching.bkp_A_side != "pair_only",
+            matching.alt_support,
+        )
+        new_rank = (
+            event.filter == "PASS",
+            event.junction_resolved,
+            event.bkp_A_side != "pair_only",
+            event.alt_support,
+        )
+        if new_rank > current_rank:
+            old_key = bucket_key(matching.event_type, canonical[matching_index][0])
+            buckets[old_key].remove(matching_index)
+            if not buckets[old_key]:
+                del buckets[old_key]
+            kept[matching_index] = event
+            canonical[matching_index] = (endpoints, orientation)
+            buckets.setdefault(key, set()).add(matching_index)
+            if matching.event_id != event.event_id:
+                aliases[matching.event_id] = event.event_id
+            event.support_read_names.update(matching.support_read_names)
+        else:
+            if event.event_id != matching.event_id:
+                aliases[event.event_id] = matching.event_id
+            matching.support_read_names.update(event.support_read_names)
+
+    for row in evidence:
+        path: list[str] = []
+        event_id = row.event_id
+        while event_id in aliases:
+            if event_id in path:
+                raise ValueError(f"Cyclic event ID alias detected: {event_id}")
+            path.append(event_id)
+            event_id = aliases[event_id]
+        row.event_id = event_id
+        for alias in path:
+            aliases[alias] = event_id
+    kept_ids = {event.event_id for event in kept}
+    return kept, [row for row in evidence if row.event_id in kept_ids]
+
+
+def _combined_ref_support(event: RepairEvent, *, control: bool = False) -> int:
+    prefix = "control_" if control else ""
+    support_a = int(getattr(event, f"{prefix}ref_support_A"))
+    support_b = getattr(event, f"{prefix}ref_support_B")
+    return min(support_a, int(support_b)) if support_b != "NA" else support_a
 
 
 def main(argv: list[str] | None = None) -> int:

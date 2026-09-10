@@ -6,11 +6,12 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 ClipSide = Literal["left_clip", "right_clip"]
+ClusterMethod = Literal["window", "evidence-graph"]
 EventType = Literal[
-    "NHEJ_INS",
-    "MMEJ_DEL",
-    "NHEJ_BND_INS_INTRA",
-    "NHEJ_BND_INS_INTER",
+    "LOCAL_INS",
+    "LOCAL_DEL",
+    "BND_INTRA",
+    "BND_INTER",
 ]
 
 
@@ -24,18 +25,25 @@ class ScannerConfig:
     control_bam: str | None = None
     candidate_bed: str | None = None
     peak_bed: str | None = None
+    skip_chrm: bool = False
     sample_name: str = "treated"
     control_name: str = "control"
     min_mapq: int = 20
     strict_min_mapq: int = 30
+    breakpoint_quality_window: int = 5
+    min_breakpoint_baseq: int = 20
+    strict_min_breakpoint_baseq: int = 25
+    min_breakpoint_quality_fraction: float = 0.8
     min_clip_length: int = 10
     clip_cluster_window: int = 20
+    cluster_method: ClusterMethod = "window"
     coverage_bin_size: int = 100
     merge_distance: int = 300
     max_normal_clip_rate: float = 0.05
+    max_control_alt_support: int = 1
     min_alt_support: int = 3
     min_bnd_support: int = 3
-    min_treated_coverage: float = 5.0
+    min_treated_coverage: float | None = None
     min_log2fc: float = 1.0
     top_percentile: float = 95.0
     pseudo_count: float = 1.0
@@ -45,17 +53,18 @@ class ScannerConfig:
     allow_duplicates: bool = False
     include_supplementary: bool = False
     min_aligned_length: int = 20
+    max_sa_nm: int = 10
     scan_padding: int = 200
     max_local_event_distance: int = 10000
     max_insertion_length: int = 50
     min_indel_length: int = 1
-    min_nhej_ins_indel_support: int = 1
-    allow_clip_only_nhej_ins: bool = False
     min_microhomology_length: int = 1
     max_microhomology_length: int = 20
     microhomology_search_window: int = 5
     second_pass_window: int = 150
     depth_count_method: str = "pileup"
+    evidence_backend: str = "auto"
+    evidence_batch_size: int = 512
 
 
 @dataclass(slots=True)
@@ -131,6 +140,7 @@ class SplitReadEvidence:
     remote_strand: str
     remote_cigar: str
     remote_mapq: int
+    remote_nm: int
     orientation: str
     mapq: int
     cigar: str
@@ -196,12 +206,17 @@ class RepairEvent:
     alt_discordant_pair_support: int = 0
     alt_indel_support: int = 0
     ref_spanning_support: int = 0
+    ref_support_A: int = 0
+    ref_support_B: int | str = "NA"
     treated_depth: int = 0
     control_depth: int = 0
-    repair_evidence_fraction: float = 0.0
+    repair_evidence_fraction: float | str = "NA"
     control_alt_support: int = 0
     control_ref_support: int = 0
-    control_repair_evidence_fraction: float = 0.0
+    control_ref_support_A: int = 0
+    control_ref_support_B: int | str = "NA"
+    control_repair_evidence_fraction: float | str = "NA"
+    control_assessed: bool = False
     score: float = 0.0
     filter: str = "NA"
     notes: str = ""
@@ -218,6 +233,8 @@ class RepairEvent:
     microhomology_low_complexity: bool = False
     junction_evidence_support: int = 0
     junction_evidence_types: set[str] = field(default_factory=set)
+    evidence_level: str = "CLIP_ONLY"
+    junction_resolved: bool = False
     support_read_names: set[str] = field(default_factory=set, repr=False)
 
     @property
@@ -231,6 +248,20 @@ class RepairEvent:
             + self.alt_split_support
             + self.alt_discordant_pair_support
             + self.alt_indel_support
+        )
+
+    @property
+    def allele_key(self) -> tuple[object, ...]:
+        """Return the structural allele represented by this event."""
+        return (
+            self.event_type,
+            self.bkp_A_chrom,
+            self.bkp_A_pos,
+            self.bkp_A_side,
+            self.bkp_B_chrom,
+            self.bkp_B_pos,
+            self.bkp_B_side,
+            self.inserted_sequence,
         )
 
 

@@ -157,6 +157,27 @@ def ensure_fasta_index(path: str) -> None:
 def validate_inputs(config: ScannerConfig) -> None:
     # Centralized validation keeps CLI startup errors deterministic before any
     # output files are written.
+    if config.min_treated_coverage is not None and (
+        not math.isfinite(config.min_treated_coverage)
+        or config.min_treated_coverage < 0
+    ):
+        raise ValueError("min_treated_coverage must be a finite non-negative number")
+    if config.breakpoint_quality_window < 1:
+        raise ValueError("breakpoint_quality_window must be at least 1")
+    if not 0 <= config.min_breakpoint_baseq <= 93:
+        raise ValueError("min_breakpoint_baseq must be between 0 and 93")
+    if not 0 <= config.strict_min_breakpoint_baseq <= 93:
+        raise ValueError("strict_min_breakpoint_baseq must be between 0 and 93")
+    if config.strict_min_breakpoint_baseq < config.min_breakpoint_baseq:
+        raise ValueError(
+            "strict_min_breakpoint_baseq must be at least min_breakpoint_baseq"
+        )
+    if not 0 < config.min_breakpoint_quality_fraction <= 1:
+        raise ValueError("min_breakpoint_quality_fraction must be in (0, 1]")
+    if config.evidence_backend not in {"auto", "native", "python"}:
+        raise ValueError("evidence_backend must be auto, native, or python")
+    if config.evidence_batch_size < 1:
+        raise ValueError("evidence_batch_size must be at least 1")
     ensure_bam_index(config.treated_bam)
     if config.control_bam:
         ensure_bam_index(config.control_bam)

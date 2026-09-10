@@ -36,7 +36,9 @@ class ReferenceGenome:
         self.close()
 
 
-def fetch_reference_sequence(reference: ReferenceGenome, chrom: str, start: int, end: int) -> str:
+def fetch_reference_sequence(
+    reference: ReferenceGenome, chrom: str, start: int, end: int
+) -> str:
     return reference.fetch(chrom, start, end)
 
 

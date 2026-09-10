@@ -6,18 +6,25 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from XXEJ_scanner.classify import _classify_mmej_del, assign_final_event_ids
+from XXEJ_scanner.classify import (
+    _classify_local_del,
+    assign_final_event_ids,
+    classify_bnd_events,
+    classify_local_events,
+)
 from XXEJ_scanner.models import (
     BreakpointCluster,
     CandidateRegion,
     CigarIndel,
     ClipSite,
+    DiscordantPair,
     EventEvidence,
     RegionEvidence,
     RepairEvent,
     ScannerConfig,
     SplitReadEvidence,
 )
+from XXEJ_scanner.validation import assign_event_filter
 
 
 class FakeReference:
@@ -119,6 +126,7 @@ def split_read(pos: int, remote_pos: int, read_name: str) -> SplitReadEvidence:
         remote_strand="+",
         remote_cigar="10M",
         remote_mapq=60,
+        remote_nm=0,
         orientation="++",
         mapq=60,
         cigar="10M",
@@ -126,10 +134,28 @@ def split_read(pos: int, remote_pos: int, read_name: str) -> SplitReadEvidence:
     )
 
 
+def discordant_pair(
+    pos: int, remote_chrom: str, remote_pos: int, read_name: str
+) -> DiscordantPair:
+    return DiscordantPair(
+        read_name=read_name,
+        chrom="chr1",
+        pos=pos,
+        mate_chrom=remote_chrom,
+        mate_pos=remote_pos,
+        orientation="+-",
+        mapq=60,
+        is_reverse=False,
+        mate_is_reverse=True,
+        cigar="100M",
+        reason="different_chrom",
+    )
+
+
 def repair_event(event_id: str, pos: int = 10) -> RepairEvent:
     return RepairEvent(
         event_id=event_id,
-        event_type="NHEJ_INS",
+        event_type="LOCAL_INS",
         chrom="chr1",
         start=pos,
         end=pos + 1,
@@ -179,8 +205,22 @@ class FinalEventIdAssignmentTest(unittest.TestCase):
             assign_final_event_ids(events, evidence)
 
 
-class ClassifyMmejDeletionTest(unittest.TestCase):
-    def test_mmej_pair_is_sorted_internally(self) -> None:
+class ClassifyLocalDeletionTest(unittest.TestCase):
+    def test_split_deletion_respects_min_indel_length(self) -> None:
+        for length in (5, 6):
+            with self.subTest(length=length):
+                evidence = RegionEvidence(
+                    region=region(),
+                    split_reads=[split_read(50, 50 + length, "split1")],
+                )
+                events, _ = _classify_local_del(
+                    region(), [], evidence,
+                    FakeReference(sequence_with_matches({})),
+                    scanner_config(min_indel_length=6, min_alt_support=1),
+                )
+                self.assertEqual(len(events), int(length >= 6))
+
+    def test_clip_pair_without_a_junction_is_not_a_deletion(self) -> None:
         left = cluster(10, "right_clip")
         right = cluster(20, "left_clip")
         evidence = RegionEvidence(
@@ -191,7 +231,7 @@ class ClassifyMmejDeletionTest(unittest.TestCase):
             ],
         )
 
-        events, _event_evidence, used = _classify_mmej_del(
+        events, event_evidence = _classify_local_del(
             region(),
             [right, left],
             evidence,
@@ -199,87 +239,45 @@ class ClassifyMmejDeletionTest(unittest.TestCase):
             scanner_config(),
         )
 
-        self.assertEqual(len(events), 1)
-        self.assertEqual(events[0].bkp_A_pos, 10)
-        self.assertEqual(events[0].bkp_A_side, "right_clip")
-        self.assertEqual(events[0].bkp_B_pos, 20)
-        self.assertEqual(events[0].bkp_B_side, "left_clip")
-        self.assertIn(("chr1", 10, "right_clip"), used)
-        self.assertIn(("chr1", 20, "left_clip"), used)
+        self.assertEqual(events, [])
+        self.assertEqual(event_evidence, [])
 
-    def test_incompatible_clip_orientation_is_not_mmej(self) -> None:
-        left = cluster(10, "right_clip")
-        right = cluster(20, "right_clip")
+    def test_reports_each_read_resolved_deletion_allele(self) -> None:
         evidence = RegionEvidence(
             region=region(),
-            clip_sites=[
-                clip_site(10, "right_clip", "left_read"),
-                clip_site(20, "right_clip", "right_read"),
+            indels=[
+                deletion_indel(10, 20, "a1"),
+                deletion_indel(10, 20, "a2"),
+                deletion_indel(30, 40, "b1"),
+                deletion_indel(30, 40, "b2"),
             ],
         )
 
-        events, _event_evidence, used = _classify_mmej_del(
+        events, _event_evidence = _classify_local_del(
             region(),
-            [left, right],
+            [],
             evidence,
             FakeReference(sequence_with_matches({})),
-            scanner_config(),
+            scanner_config(min_alt_support=2),
         )
 
-        self.assertEqual(events, [])
-        self.assertEqual(used, set())
+        self.assertEqual([(event.start, event.end) for event in events], [(10, 20), (30, 40)])
+        self.assertTrue(all(event.event_type == "LOCAL_DEL" for event in events))
+        self.assertTrue(all(event.junction_resolved for event in events))
 
-    def test_pair_scoring_can_prefer_lower_clip_support_with_mh_and_junction(self) -> None:
-        high_clip_left = cluster(10, "right_clip", count=5)
-        high_clip_right = cluster(30, "left_clip", count=5)
-        mh_left = cluster(100, "right_clip", count=3)
-        mh_right = cluster(120, "left_clip", count=3)
-        evidence = RegionEvidence(
-            region=region(),
-            clip_sites=[
-                clip_site(10, "right_clip", "a1"),
-                clip_site(30, "left_clip", "a2"),
-                clip_site(100, "right_clip", "b1"),
-                clip_site(120, "left_clip", "b2"),
-            ],
-            indels=[
-                deletion_indel(100, 126, "indel1"),
-                deletion_indel(100, 126, "indel2"),
-            ],
-        )
-
-        events, _event_evidence, _used = _classify_mmej_del(
-            region(),
-            [high_clip_left, high_clip_right, mh_left, mh_right],
-            evidence,
-            FakeReference(sequence_with_matches({94: "GATTAC", 120: "GATTAC"})),
-            scanner_config(max_local_event_distance=50, max_microhomology_length=6),
-        )
-
-        self.assertEqual(len(events), 1)
-        self.assertEqual(events[0].bkp_A_pos, 100)
-        self.assertEqual(events[0].bkp_B_pos, 120)
-        self.assertEqual(events[0].microhomology, "GATTAC")
-        self.assertEqual(events[0].alt_indel_support, 2)
-        self.assertIn("cigar_del", events[0].junction_evidence_types)
-
-    def test_adjusted_microhomology_span_matches_cigar_deletion(self) -> None:
+    def test_microhomology_is_annotated_only_at_resolved_coordinates(self) -> None:
         left = cluster(100, "right_clip")
-        right = cluster(120, "left_clip")
+        right = cluster(123, "left_clip")
         evidence = RegionEvidence(
             region=region(),
-            clip_sites=[
-                clip_site(100, "right_clip", "left_read"),
-                clip_site(120, "left_clip", "right_read"),
-            ],
             indels=[deletion_indel(102, 123, "indel1")],
         )
 
-        events, _event_evidence, _used = _classify_mmej_del(
+        events, _event_evidence = _classify_local_del(
             region(),
             [left, right],
             evidence,
-            FakeReference(sequence_with_matches({98: "TTGA", 119: "TTGA"})),
+            FakeReference(sequence_with_matches({98: "TTGA", 123: "TTGA"})),
             scanner_config(
                 clip_cluster_window=1,
                 min_microhomology_length=4,
@@ -291,10 +289,12 @@ class ClassifyMmejDeletionTest(unittest.TestCase):
         self.assertEqual(len(events), 1)
         event = events[0]
         self.assertEqual(event.microhomology_left_end, 102)
-        self.assertEqual(event.microhomology_right_start, 119)
+        self.assertEqual(event.microhomology_right_start, 123)
+        self.assertEqual(event.microhomology_offset_a, 0)
+        self.assertEqual(event.microhomology_offset_b, 0)
         self.assertEqual(event.microhomology_deletion_start, 102)
-        self.assertEqual(event.microhomology_deletion_end, 123)
-        self.assertEqual(event.microhomology_deletion_length, 21)
+        self.assertEqual(event.microhomology_deletion_end, 127)
+        self.assertEqual(event.microhomology_deletion_length, 25)
         self.assertEqual(event.alt_indel_support, 1)
         self.assertEqual(event.junction_evidence_support, 1)
         self.assertEqual(event.junction_evidence_types, {"cigar_del"})
@@ -311,7 +311,7 @@ class ClassifyMmejDeletionTest(unittest.TestCase):
             split_reads=[split_read(50, 80, "split1")],
         )
 
-        events, event_evidence, _used = _classify_mmej_del(
+        events, event_evidence = _classify_local_del(
             region(),
             [left, right],
             evidence,
@@ -331,6 +331,173 @@ class ClassifyMmejDeletionTest(unittest.TestCase):
             {"soft_clip_remap", "split_read_sa"},
         )
         self.assertIn("split_read_sa", {row.evidence_type for row in event_evidence})
+
+    def test_local_deletion_and_remote_bnd_are_both_reported(self) -> None:
+        left = cluster(50, "right_clip")
+        right = cluster(80, "left_clip")
+        evidence = RegionEvidence(
+            region=region(),
+            clip_sites=[
+                clip_site(50, "right_clip", "left_read"),
+                clip_site(80, "left_clip", "right_read"),
+            ],
+            indels=[deletion_indel(50, 80, "del1")],
+            discordant_pairs=[discordant_pair(50, "chr2", 500, "pair1")],
+        )
+
+        events, event_evidence = classify_local_events(
+            region(),
+            [left, right],
+            evidence,
+            FakeReference(sequence_with_matches({})),
+            scanner_config(min_bnd_support=1),
+        )
+
+        event_types = [event.event_type for event in events]
+        self.assertEqual(event_types, ["LOCAL_DEL", "BND_INTER"])
+        self.assertEqual(events[1].bkp_A_pos, 50)
+        self.assertEqual(events[1].remote_chrom, "chr2")
+        self.assertIn(
+            "discordant_pair", {row.evidence_type for row in event_evidence}
+        )
+
+
+class ClassifyBndEventsTest(unittest.TestCase):
+    def test_pair_only_discordant_pair_emits_bnd_without_cluster(self) -> None:
+        config = scanner_config(min_alt_support=3, min_bnd_support=3)
+        evidence = RegionEvidence(
+            region=region(),
+            discordant_pairs=[discordant_pair(50, "chr2", 500, "pair1")],
+        )
+
+        events, event_evidence = classify_local_events(
+            region(),
+            [],
+            evidence,
+            FakeReference(sequence_with_matches({})),
+            config,
+        )
+
+        self.assertEqual(len(events), 1)
+        event = events[0]
+        self.assertEqual(event.event_type, "BND_INTER")
+        self.assertEqual(event.bkp_A_pos, 50)
+        self.assertEqual(event.bkp_A_side, "pair_only")
+        self.assertEqual(event.remote_chrom, "chr2")
+        self.assertEqual(event.alt_clip_support, 0)
+        self.assertEqual(event.alt_discordant_pair_support, 1)
+        self.assertEqual(assign_event_filter(event, config), "PairOnlyBnd")
+        self.assertIn(
+            "discordant_pair", {row.evidence_type for row in event_evidence}
+        )
+
+    def test_discordant_pair_does_not_need_to_be_near_peak(self) -> None:
+        local_cluster = cluster(100, "left_clip")
+        evidence = RegionEvidence(
+            region=region(),
+            clip_sites=[clip_site(100, "left_clip", "clip1")],
+            discordant_pairs=[discordant_pair(20, "chr2", 500, "pair1")],
+        )
+
+        events, event_evidence = classify_bnd_events(
+            region(),
+            [local_cluster],
+            evidence,
+            scanner_config(min_bnd_support=1),
+        )
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].event_type, "BND_INTER")
+        self.assertEqual(events[0].bkp_A_pos, 100)
+        self.assertIn(
+            "discordant_pair", {row.evidence_type for row in event_evidence}
+        )
+
+    def test_discordant_pair_is_assigned_to_nearest_cluster_once(self) -> None:
+        left_cluster = cluster(100, "left_clip")
+        right_cluster = cluster(160, "right_clip")
+        evidence = RegionEvidence(
+            region=region(),
+            clip_sites=[
+                clip_site(100, "left_clip", "clip1"),
+                clip_site(160, "right_clip", "clip2"),
+            ],
+            discordant_pairs=[discordant_pair(150, "chr2", 500, "pair1")],
+        )
+
+        events, _event_evidence = classify_bnd_events(
+            region(),
+            [left_cluster, right_cluster],
+            evidence,
+            scanner_config(min_bnd_support=1),
+        )
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].bkp_A_pos, 160)
+
+    def test_nearby_same_chromosome_split_is_not_bnd(self) -> None:
+        local_cluster = cluster(100, "left_clip")
+        evidence = RegionEvidence(
+            region=region(),
+            clip_sites=[clip_site(100, "left_clip", "clip1")],
+            split_reads=[split_read(100, 120, "split1")],
+        )
+
+        events, event_evidence = classify_bnd_events(
+            region(),
+            [local_cluster],
+            evidence,
+            scanner_config(min_bnd_support=1, max_local_event_distance=1000),
+        )
+
+        self.assertEqual(events, [])
+        self.assertEqual(event_evidence, [])
+
+    def test_distant_same_chromosome_split_is_bnd_intra(self) -> None:
+        local_cluster = cluster(100, "left_clip")
+        evidence = RegionEvidence(
+            region=region(),
+            clip_sites=[clip_site(100, "left_clip", "clip1")],
+            split_reads=[split_read(100, 2000, "split1")],
+        )
+
+        events, event_evidence = classify_bnd_events(
+            region(),
+            [local_cluster],
+            evidence,
+            scanner_config(min_bnd_support=1, max_local_event_distance=1000),
+        )
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].event_type, "BND_INTRA")
+        self.assertEqual(events[0].bkp_B_pos, 2000)
+        self.assertIn("split_read_sa", {row.evidence_type for row in event_evidence})
+
+    def test_split_anchor_absorbs_nearby_pair_across_bin_boundary(self) -> None:
+        local_cluster = cluster(100, "left_clip")
+        split = split_read(100, 1999, "split1")
+        pair = discordant_pair(100, "chr1", 2001, "pair1")
+        evidence = RegionEvidence(
+            region=region(),
+            split_reads=[split],
+            discordant_pairs=[pair],
+        )
+
+        events, _rows = classify_bnd_events(
+            region(),
+            [local_cluster],
+            evidence,
+            scanner_config(
+                min_bnd_support=1,
+                max_local_event_distance=1000,
+                coverage_bin_size=10,
+            ),
+        )
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].alt_split_support, 1)
+        self.assertEqual(events[0].alt_discordant_pair_support, 1)
+        self.assertEqual(events[0].remote_pos, 2000)
 
 
 if __name__ == "__main__":

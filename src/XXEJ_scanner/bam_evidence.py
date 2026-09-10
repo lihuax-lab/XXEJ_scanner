@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from math import ceil
 from typing import Iterable, Iterator
 
 import pysam
@@ -27,6 +28,7 @@ from .utils import (
     cigar_to_string,
     clamp_start,
     pair_orientation,
+    parse_cigar_string,
     reference_consumed_length,
 )
 
@@ -104,6 +106,31 @@ def passes_read_filters(
     return True
 
 
+def passes_breakpoint_quality(
+    read: object,
+    query_pos: int | None,
+    config: ScannerConfig,
+    *,
+    min_baseq: int | None = None,
+) -> bool:
+    """Check a query window centered on one resolved breakpoint boundary."""
+    threshold = config.min_breakpoint_baseq if min_baseq is None else min_baseq
+    if threshold <= 0:
+        return True
+    qualities = getattr(read, "query_qualities", None)
+    radius = config.breakpoint_quality_window
+    if (
+        query_pos is None
+        or qualities is None
+        or query_pos < radius
+        or query_pos + radius > len(qualities)
+    ):
+        return False
+    window = qualities[query_pos - radius : query_pos + radius]
+    required = ceil(len(window) * config.min_breakpoint_quality_fraction)
+    return sum(quality >= threshold for quality in window) >= required
+
+
 def clip_lengths(
     cigartuples: list[tuple[int, int]] | tuple[tuple[int, int], ...] | None,
 ) -> tuple[int, int, str, str]:
@@ -133,7 +160,12 @@ def is_strongly_clipped(read: object, min_clip_length: int) -> bool:
     return left >= min_clip_length or right >= min_clip_length
 
 
-def extract_clip_sites_from_read(read: object, config: ScannerConfig) -> list[ClipSite]:
+def extract_clip_sites_from_read(
+    read: object,
+    config: ScannerConfig,
+    *,
+    min_baseq: int | None = None,
+) -> list[ClipSite]:
     if not passes_read_filters(read, config):
         return []
 
@@ -147,7 +179,12 @@ def extract_clip_sites_from_read(read: object, config: ScannerConfig) -> list[Cl
     strand = "-" if getattr(read, "is_reverse", False) else "+"
     sites: list[ClipSite] = []
 
-    if left_len >= config.min_clip_length:
+    if left_len >= config.min_clip_length and passes_breakpoint_quality(
+        read,
+        left_len if left_type == "S" else None,
+        config,
+        min_baseq=min_baseq,
+    ):
         # Left soft clipping means the clipped bases occur before the aligned
         # portion of the query, so the candidate break lies at reference_start.
         sequence = (
@@ -171,7 +208,12 @@ def extract_clip_sites_from_read(read: object, config: ScannerConfig) -> list[Cl
             )
         )
 
-    if right_len >= config.min_clip_length:
+    if right_len >= config.min_clip_length and passes_breakpoint_quality(
+        read,
+        len(query_sequence) - right_len if right_type == "S" else None,
+        config,
+        min_baseq=min_baseq,
+    ):
         # Right soft clipping points to the reference end of the alignment. This
         # is a 0-based half-open end coordinate from pysam.
         sequence = (
@@ -201,7 +243,10 @@ def extract_clip_sites_from_read(read: object, config: ScannerConfig) -> list[Cl
 
 
 def extract_cigar_indels_from_read(
-    read: object, config: ScannerConfig
+    read: object,
+    config: ScannerConfig,
+    *,
+    min_baseq: int | None = None,
 ) -> list[CigarIndel]:
     if not passes_read_filters(read, config):
         return []
@@ -216,7 +261,12 @@ def extract_cigar_indels_from_read(
         # ref_pos and query_pos are advanced independently because insertions
         # consume query only, while deletions consume reference only.
         if op == CIGAR_INS:
-            if length >= config.min_indel_length:
+            if length >= config.min_indel_length and all(
+                passes_breakpoint_quality(
+                    read, boundary, config, min_baseq=min_baseq
+                )
+                for boundary in (query_pos, query_pos + length)
+            ):
                 sequence = (
                     query_sequence[query_pos : query_pos + length]
                     if query_sequence
@@ -236,7 +286,9 @@ def extract_cigar_indels_from_read(
                     )
                 )
         elif op == CIGAR_DEL:
-            if length >= config.min_indel_length:
+            if length >= config.min_indel_length and passes_breakpoint_quality(
+                read, query_pos, config, min_baseq=min_baseq
+            ):
                 indels.append(
                     CigarIndel(
                         chrom=chrom,
@@ -296,13 +348,18 @@ def is_discordant_pair(
         elif orientation in {"ff", "rr"} and not same_strand:
             reasons.append("opposite_strand_pair")
 
+    mate_outside_candidate_region = False
     if region is not None and chrom == mate_chrom:
         # A same-chromosome mate can still support wrong-end joining if it lands
-        # outside the enriched local search interval plus a small merge buffer.
+        # outside the enriched local search interval plus a small merge buffer,
+        # but that alone should not turn an otherwise proper pair into
+        # discordant evidence.
         padded_start = region.start - config.merge_distance
         padded_end = region.end + config.merge_distance
-        if mate_pos < padded_start or mate_pos > padded_end:
-            reasons.append("mate_outside_candidate_region")
+        mate_outside_candidate_region = mate_pos < padded_start or mate_pos > padded_end
+
+    if mate_outside_candidate_region and reasons:
+        reasons.append("mate_outside_candidate_region")
 
     return bool(reasons), ",".join(reasons)
 
@@ -331,8 +388,46 @@ def extract_discordant_pair_from_read(
     )
 
 
+def _alignment_geometry(
+    reference_start: int,
+    cigartuples: list[tuple[int, int]],
+    strand: str,
+) -> tuple[int, int, int, int]:
+    """Return query start/end and reference start/end for one alignment segment."""
+    left_clip, right_clip, _, _ = clip_lengths(cigartuples)
+    query_span = sum(
+        length
+        for op, length in cigartuples
+        if op in QUERY_CONSUMING_OPS or op == CIGAR_HARD_CLIP
+    )
+    if strand == "+":
+        query_start, query_end = left_clip, query_span - right_clip
+    else:
+        query_start, query_end = right_clip, query_span - left_clip
+    return (
+        query_start,
+        query_end,
+        reference_start,
+        reference_start + reference_consumed_length(cigartuples),
+    )
+
+
+def _breakpoint_for_query_edge(
+    geometry: tuple[int, int, int, int], strand: str, edge: str
+) -> tuple[int, str]:
+    _query_start, _query_end, reference_start, reference_end = geometry
+    uses_reference_start = (edge == "start") == (strand == "+")
+    if uses_reference_start:
+        return reference_start, "left_clip"
+    return reference_end, "right_clip"
+
+
 def extract_split_reads_from_sa_tag(
-    read: object, config: ScannerConfig
+    read: object,
+    config: ScannerConfig,
+    *,
+    min_mapq: int | None = None,
+    min_baseq: int | None = None,
 ) -> list[SplitReadEvidence]:
     if not passes_read_filters(read, config):
         return []
@@ -342,20 +437,17 @@ def extract_split_reads_from_sa_tag(
     # rname,pos,strand,CIGAR,mapQ,NM;... with 1-based positions.
     sa_tag = get_tag(read, "SA")
     chrom = read_reference_name(read)
-    local_pos = int(getattr(read, "reference_start"))
     orientation_local = "-" if getattr(read, "is_reverse", False) else "+"
     cigar = cigar_to_string(getattr(read, "cigartuples", None))
+    local_geometry = _alignment_geometry(
+        int(getattr(read, "reference_start")),
+        list(getattr(read, "cigartuples", None) or []),
+        orientation_local,
+    )
+    left_clip, right_clip, left_type, right_type = clip_lengths(
+        getattr(read, "cigartuples", None)
+    )
     splits: list[SplitReadEvidence] = []
-
-    left_len, right_len, _, _ = clip_lengths(getattr(read, "cigartuples", None))
-    if left_len >= config.min_clip_length and right_len >= config.min_clip_length:
-        side = "both"
-    elif left_len >= config.min_clip_length:
-        side = "left_clip"
-    elif right_len >= config.min_clip_length:
-        side = "right_clip"
-    else:
-        side = "SA"
 
     for item in sa_tag.rstrip(";").split(";"):
         if not item:
@@ -363,16 +455,48 @@ def extract_split_reads_from_sa_tag(
         fields = item.split(",")
         if len(fields) < 6:
             continue
-        remote_chrom, remote_pos_1, remote_strand, remote_cigar, remote_mapq, _nm = (
+        remote_chrom, remote_pos_1, remote_strand, remote_cigar, remote_mapq, nm = (
             fields[:6]
         )
         try:
-            # Convert SAM's 1-based SA position to the 0-based convention used
-            # everywhere else in this package.
-            remote_pos = int(remote_pos_1) - 1
+            remote_start = int(remote_pos_1) - 1
             remote_mapq_int = int(remote_mapq)
+            remote_nm_int = int(nm)
+            remote_cigartuples = parse_cigar_string(remote_cigar)
         except ValueError:
             continue
+        threshold = config.min_mapq if min_mapq is None else min_mapq
+        if remote_mapq_int < threshold or remote_nm_int > config.max_sa_nm:
+            continue
+        remote_geometry = _alignment_geometry(
+            remote_start, remote_cigartuples, remote_strand
+        )
+        local_first = (
+            local_geometry[0] + local_geometry[1]
+            <= remote_geometry[0] + remote_geometry[1]
+        )
+        local_edge, remote_edge = (
+            ("end", "start") if local_first else ("start", "end")
+        )
+        local_pos, side = _breakpoint_for_query_edge(
+            local_geometry, orientation_local, local_edge
+        )
+        query_boundary = (
+            left_clip
+            if side == "left_clip" and left_type == "S"
+            else (
+                len(getattr(read, "query_sequence", None) or "") - right_clip
+                if side == "right_clip" and right_type == "S"
+                else None
+            )
+        )
+        if not passes_breakpoint_quality(
+            read, query_boundary, config, min_baseq=min_baseq
+        ):
+            continue
+        remote_pos, _remote_side = _breakpoint_for_query_edge(
+            remote_geometry, remote_strand, remote_edge
+        )
         splits.append(
             SplitReadEvidence(
                 read_name=str(getattr(read, "query_name", "")),
@@ -384,6 +508,7 @@ def extract_split_reads_from_sa_tag(
                 remote_strand=remote_strand,
                 remote_cigar=remote_cigar,
                 remote_mapq=remote_mapq_int,
+                remote_nm=remote_nm_int,
                 orientation=orientation_local + remote_strand,
                 mapq=int(getattr(read, "mapping_quality", 0)),
                 cigar=cigar,
@@ -419,13 +544,14 @@ def collect_region_evidence(
     *,
     padding: int | None = None,
     min_mapq: int | None = None,
+    min_baseq: int | None = None,
 ) -> RegionEvidence:
     pad = config.scan_padding if padding is None else padding
     evidence = RegionEvidence(region=region)
     # Avoid counting the same read name multiple times when both mates or
     # multiple SA records point to the same remote locus.
     seen_discordant: set[str] = set()
-    seen_split: set[tuple[str, str, int]] = set()
+    seen_split: set[tuple[object, ...]] = set()
     with pysam.AlignmentFile(bam_path, "rb") as bam:
         for read in iter_bam_records(
             bam,
@@ -435,14 +561,27 @@ def collect_region_evidence(
             config,
             min_mapq=min_mapq,
         ):
-            evidence.clip_sites.extend(extract_clip_sites_from_read(read, config))
-            evidence.indels.extend(extract_cigar_indels_from_read(read, config))
+            evidence.clip_sites.extend(
+                extract_clip_sites_from_read(read, config, min_baseq=min_baseq)
+            )
+            evidence.indels.extend(
+                extract_cigar_indels_from_read(read, config, min_baseq=min_baseq)
+            )
             discordant = extract_discordant_pair_from_read(read, config, region)
             if discordant and discordant.read_name not in seen_discordant:
                 evidence.discordant_pairs.append(discordant)
                 seen_discordant.add(discordant.read_name)
-            for split in extract_split_reads_from_sa_tag(read, config):
-                key = (split.read_name, split.remote_chrom, split.remote_pos)
+            for split in extract_split_reads_from_sa_tag(
+                read, config, min_mapq=min_mapq, min_baseq=min_baseq
+            ):
+                key = (
+                    split.read_name,
+                    split.chrom,
+                    split.pos,
+                    split.remote_chrom,
+                    split.remote_pos,
+                    split.orientation,
+                )
                 if key not in seen_split:
                     evidence.split_reads.append(split)
                     seen_split.add(key)
@@ -462,9 +601,7 @@ def _count_read_name_depth(
     read_names: set[str] = set()
 
     with pysam.AlignmentFile(bam_path, "rb") as bam:
-        for read in iter_bam_records(
-            bam, chrom, start, end, config, min_mapq=min_mapq
-        ):
+        for read in iter_bam_records(bam, chrom, start, end, config, min_mapq=min_mapq):
             if get_reference_end(read) <= start or int(read.reference_start) >= end:
                 continue
 

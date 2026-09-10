@@ -1,9 +1,15 @@
+.DS_Store
 .venv/
 venv/
 __pycache__/
 *.py[cod]
+*.so
+*.dylib
 build/
 dist/
 *.egg-info/
 .coverage
 .pytest_cache/
+sim/
+.idea/
+compile_flags.txt
