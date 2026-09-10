@@ -147,13 +147,13 @@ def call_candidate_regions(
 ) -> list[CandidateRegion]:
     treated_bins = compute_binned_coverage(treated_bam, config)
     control_bins = compute_binned_coverage(control_bam, config) if control_bam else {}
-    if control_bam:
+    if config.min_treated_coverage is not None:
         coverage_threshold = config.min_treated_coverage
-    # If no control is supplied, use a top-percentile floor to avoid reporting
-    # every low-coverage bin. With a control, rely on min coverage + log2FC.
+    elif control_bam:
+        coverage_threshold = 5.0
+    # Without a control or an explicit cutoff, use the requested percentile.
     else:
-        dynamic_threshold = percentile(treated_bins.values(), config.top_percentile)
-        coverage_threshold = max(config.min_treated_coverage, dynamic_threshold)
+        coverage_threshold = percentile(treated_bins.values(), config.top_percentile)
 
     control_scale = 1.0
     if control_bam:

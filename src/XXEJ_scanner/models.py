@@ -25,6 +25,7 @@ class ScannerConfig:
     control_bam: str | None = None
     candidate_bed: str | None = None
     peak_bed: str | None = None
+    skip_chrm: bool = False
     sample_name: str = "treated"
     control_name: str = "control"
     min_mapq: int = 20
@@ -42,7 +43,7 @@ class ScannerConfig:
     max_control_alt_support: int = 1
     min_alt_support: int = 3
     min_bnd_support: int = 3
-    min_treated_coverage: float = 5.0
+    min_treated_coverage: float | None = None
     min_log2fc: float = 1.0
     top_percentile: float = 95.0
     pseudo_count: float = 1.0

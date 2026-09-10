@@ -85,6 +85,7 @@ Optional:
 --min-breakpoint-quality-fraction 0.8
 --max-sa-nm 10
 --max-control-alt-support 1
+--min-treated-coverage 12.5
 --microhomology-search-window 5
 --include-supplementary
 ```
@@ -190,7 +191,7 @@ By default, discovery filters use mapped, primary, non-secondary alignments that
 
 Candidate discovery always unions coverage/BED intervals with genome-wide strong structural evidence. Exact CIGAR indel alleles and bounded SA/discordant-pair clusters must meet their event support threshold; soft-clip-only evidence remains limited to coverage/BED intervals. This prevents low-coverage resolved junctions from being discarded while avoiding a genome-wide expansion driven only by clipping noise.
 
-When no control BAM is supplied, coverage candidates use the treated sample's high-coverage bins. For broad no-control scans, consider stricter thresholds such as `--top-percentile 99`, `--min-treated-coverage 20`, and `--min-alt-support 5`. Avoid `--include-supplementary` unless supplementary records are specifically needed, because SA tags on primary alignments are already parsed.
+When no control BAM is supplied, coverage candidates use `--top-percentile` unless `--min-treated-coverage` is explicitly supplied, in which case that exact coverage cutoff is used. For broad no-control scans, consider stricter thresholds such as `--top-percentile 99` or `--min-treated-coverage 20`, plus `--min-alt-support 5`. Avoid `--include-supplementary` unless supplementary records are specifically needed, because SA tags on primary alignments are already parsed.
 
 ## Event Types
 

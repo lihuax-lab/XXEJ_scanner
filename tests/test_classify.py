@@ -206,6 +206,20 @@ class FinalEventIdAssignmentTest(unittest.TestCase):
 
 
 class ClassifyLocalDeletionTest(unittest.TestCase):
+    def test_split_deletion_respects_min_indel_length(self) -> None:
+        for length in (5, 6):
+            with self.subTest(length=length):
+                evidence = RegionEvidence(
+                    region=region(),
+                    split_reads=[split_read(50, 50 + length, "split1")],
+                )
+                events, _ = _classify_local_del(
+                    region(), [], evidence,
+                    FakeReference(sequence_with_matches({})),
+                    scanner_config(min_indel_length=6, min_alt_support=1),
+                )
+                self.assertEqual(len(events), int(length >= 6))
+
     def test_clip_pair_without_a_junction_is_not_a_deletion(self) -> None:
         left = cluster(10, "right_clip")
         right = cluster(20, "left_clip")

@@ -63,6 +63,11 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--output-dir", required=True)
     scan.add_argument("--candidate-bed", default=None)
     scan.add_argument("--peak-bed", default=None)
+    scan.add_argument(
+        "--skip-chrm",
+        action="store_true",
+        help="Exclude chrM candidate regions from evidence extraction and output.",
+    )
     scan.add_argument("--sample-name", default="treated")
     scan.add_argument("--control-name", default="control")
     scan.add_argument("--min-mapq", type=int, default=20)
@@ -122,7 +127,7 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--max-control-alt-support", type=int, default=1)
     scan.add_argument("--min-alt-support", type=int, default=3)
     scan.add_argument("--min-bnd-support", type=int, default=3)
-    scan.add_argument("--min-treated-coverage", type=float, default=5.0)
+    scan.add_argument("--min-treated-coverage", type=float, default=None)
     scan.add_argument("--min-log2fc", type=float, default=1.0)
     scan.add_argument("--top-percentile", type=float, default=95.0)
     scan.add_argument("--pseudo-count", type=float, default=1.0)
@@ -159,6 +164,7 @@ def _config_from_args(args: argparse.Namespace) -> ScannerConfig:
         output_dir=args.output_dir,
         candidate_bed=args.candidate_bed,
         peak_bed=args.peak_bed,
+        skip_chrm=args.skip_chrm,
         sample_name=args.sample_name,
         control_name=args.control_name,
         min_mapq=args.min_mapq,
@@ -218,6 +224,8 @@ def run_scan(config: ScannerConfig) -> dict[str, object]:
         regions = call_candidate_regions(config.treated_bam, config, config.control_bam)
     structural_regions = call_structural_evidence_regions(config.treated_bam, config)
     regions = merge_candidate_bins([*regions, *structural_regions], 0)
+    if config.skip_chrm:
+        regions = [region for region in regions if region.chrom != "chrM"]
     regions = annotate_region_coverage(
         regions, config.treated_bam, config, config.control_bam
     )
@@ -356,6 +364,7 @@ def run_scan(config: ScannerConfig) -> dict[str, object]:
         "treated_bam": str(Path(config.treated_bam)),
         "control_bam": str(Path(config.control_bam)) if config.control_bam else None,
         "reference_fasta": str(Path(config.reference_fasta)),
+        "skip_chrm": config.skip_chrm,
         "candidate_regions": len(regions),
         "structural_candidate_regions": len(structural_regions),
         "cluster_method": config.cluster_method,

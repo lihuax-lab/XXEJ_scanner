@@ -491,7 +491,7 @@ def _classify_local_del(
         if split.chrom != split.remote_chrom:
             continue
         start, end = sorted((split.pos, split.remote_pos))
-        if 0 < end - start <= config.max_local_event_distance:
+        if max(1, config.min_indel_length) <= end - start <= config.max_local_event_distance:
             grouped[(split.chrom, start, end)]["splits"].append(split)
 
     events: list[RepairEvent] = []
